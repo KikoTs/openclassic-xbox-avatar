@@ -1,0 +1,181 @@
+using System;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+
+internal static class AvatarProtocolSmoke
+{
+    private const BindingFlags Hidden =
+        BindingFlags.Instance | BindingFlags.Static |
+        BindingFlags.Public | BindingFlags.NonPublic;
+
+    private static int Main(string[] args)
+    {
+        if (args.Length != 2)
+        {
+            Console.Error.WriteLine("Usage: AvatarProtocolSmoke <mod.dll> <avatar.ocavatar>");
+            return 2;
+        }
+
+        Assembly mod = Assembly.LoadFrom(Path.GetFullPath(args[0]));
+        Type packetType = mod.GetType(
+            "OpenClassic.XboxAvatar.ZZOpenClassicAvatarSyncMessage",
+            true);
+        object packet = Activator.CreateInstance(packetType, true);
+        MethodInfo receive = packetType.GetMethod("RecieveData", Hidden);
+        MethodInfo send = packetType.GetMethod("SendData", Hidden);
+
+        byte[] payload = Enumerable.Range(0, 3000)
+            .Select(index => (byte)(index * 17))
+            .ToArray();
+        Set(packetType, packet, "Protocol", (byte)1);
+        Set(packetType, packet, "Kind", (byte)4);
+        Set(packetType, packet, "TransferId", 0x12345678u);
+        Set(packetType, packet, "TotalLength", 6000);
+        Set(packetType, packet, "ChunkIndex", (ushort)0);
+        Set(packetType, packet, "ChunkCount", (ushort)2);
+        Set(packetType, packet, "Hash", Enumerable.Repeat((byte)0x5a, 32).ToArray());
+        Set(packetType, packet, "Payload", payload);
+
+        byte[] serialized;
+        using (var stream = new MemoryStream())
+        using (var writer = new BinaryWriter(stream))
+        {
+            send.Invoke(packet, new object[] { writer });
+            writer.Flush();
+            serialized = stream.ToArray();
+        }
+        Require(serialized.Length == 3048, "maximum chunk is not 3048 bytes");
+        object roundTrip = Activator.CreateInstance(packetType, true);
+        using (var stream = new MemoryStream(serialized))
+        using (var reader = new BinaryReader(stream))
+        {
+            receive.Invoke(roundTrip, new object[] { reader });
+        }
+        byte[] restored = (byte[])Get(packetType, roundTrip, "Payload");
+        Require(payload.SequenceEqual(restored), "packet round-trip changed payload");
+
+        byte[] oversized = (byte[])serialized.Clone();
+        oversized[46] = 0xb9;
+        oversized[47] = 0x0b; // 3001
+        ExpectFailure(receive, packetType, oversized, typeof(InvalidDataException));
+        ExpectFailure(
+            receive,
+            packetType,
+            serialized.Take(40).ToArray(),
+            typeof(EndOfStreamException));
+
+        Type assetType = mod.GetType("OpenClassic.XboxAvatar.AvatarAsset", true);
+        object asset = assetType.GetMethod("Load", Hidden).Invoke(
+            null,
+            new object[] { Path.GetFullPath(args[1]) });
+        object body = Get(assetType, asset, "BaseBodyBatch");
+        object glove = Get(assetType, asset, "OuterHandBatch");
+        System.Collections.ICollection gloveBatches =
+            (System.Collections.ICollection)Get(
+                assetType,
+                asset,
+                "OuterHandBatches");
+        Require(body != null, "v3 asset has no base body");
+        Require(glove != null, "v3 asset did not classify outfit glove");
+        Require(gloveBatches.Count >= 1,
+            "combined outfit exposed no glove material batches");
+        Type batchType = glove.GetType();
+        uint gloveCategory = (uint)Get(batchType, glove, "CategoryMask");
+        Require((gloveCategory & 0x80u) != 0,
+            "glove category bit was not preserved");
+        Require(!(bool)Get(batchType, glove, "IsBareHandShell"),
+            "black outfit glove was classified as bare skin");
+
+        Array batches = (Array)Get(assetType, asset, "Batches");
+        bool topPreserved = batches.Cast<object>().Any(value =>
+            ((uint)Get(value.GetType(), value, "CategoryMask") & 0x8u) != 0);
+        Require(topPreserved, "upper-body/sleeve component category is missing");
+
+        object[] headGeometry = batches.Cast<object>().Where(value =>
+        {
+            string name = (string)Get(value.GetType(), value, "Name");
+            return name.StartsWith("00000001-", StringComparison.OrdinalIgnoreCase) &&
+                name.IndexOf(":head:", StringComparison.OrdinalIgnoreCase) >= 0;
+        }).ToArray();
+        Require(headGeometry.Length == 2,
+            "the two mirrored Xbox head halves were not both preserved");
+        object[] faceLayers = batches.Cast<object>().Where(value =>
+            ((string)Get(value.GetType(), value, "Name"))
+                .IndexOf(":face-layer-", StringComparison.OrdinalIgnoreCase) >= 0)
+            .ToArray();
+        Require(faceLayers.Length >= 70 && faceLayers.Length <= 72,
+            "the complete static face, facial-hair, 5-frame brow, and 14-frame eye/mouth overlays are incomplete");
+        Require(faceLayers.All(value =>
+            ((byte[])Get(value.GetType(), value, "TexturePng")).Length > 0),
+            "a face overlay has no baked RGBA texture");
+        Require(faceLayers.All(value =>
+            (int)Get(value.GetType(), value, "FaceTextureUsage") >= 0 &&
+            (int)Get(value.GetType(), value, "FaceFrame") >= 0),
+            "a face overlay name did not decode into expression metadata");
+        // Eye shadow (usage 6) is optional and is absent when the editor's
+        // selected avatar has no makeup/shadow layer.
+        int[] requiredFaceUsages = { 5, 7, 8, 9, 10, 11, 12 };
+        Require(requiredFaceUsages.All(usage => faceLayers.Any(value =>
+            (int)Get(value.GetType(), value, "FaceTextureUsage") == usage)),
+            "facial hair, skin features, or expression layers are missing");
+        Require(new FileInfo(Path.GetFullPath(args[1])).Length <= 4 * 1024 * 1024,
+            "avatar exceeds the network transfer limit");
+
+        Type bridge = mod.GetType(
+            "OpenClassic.XboxAvatar.AvatarNetworkBridge",
+            true);
+        bridge.GetMethod("OnGamerJoined", Hidden).Invoke(null, new object[] { null });
+        Require(!(bool)bridge.GetMethod("OnMessage", Hidden).Invoke(
+            null,
+            new object[] { null }),
+            "non-avatar messages must fall through to Castle Miner Z");
+
+        Console.WriteLine(
+            "PASS: v3 independent material passes/gloves, two head halves, 70-72 RGBA face layers, " +
+            "null-safe pre-join bridge, 3048-byte network round-trip, oversize " +
+            "rejection, and truncation rejection.");
+        return 0;
+    }
+
+    private static void ExpectFailure(
+        MethodInfo receive,
+        Type packetType,
+        byte[] bytes,
+        Type expected)
+    {
+        try
+        {
+            object packet = Activator.CreateInstance(packetType, true);
+            using (var stream = new MemoryStream(bytes))
+            using (var reader = new BinaryReader(stream))
+            {
+                receive.Invoke(packet, new object[] { reader });
+            }
+            throw new Exception("Malformed packet was accepted.");
+        }
+        catch (TargetInvocationException exception)
+        {
+            Require(expected.IsInstanceOfType(exception.InnerException),
+                "wrong malformed-packet exception: " + exception.InnerException);
+        }
+    }
+
+    private static object Get(Type type, object instance, string name)
+    {
+        return type.GetField(name, Hidden).GetValue(instance);
+    }
+
+    private static void Set(Type type, object instance, string name, object value)
+    {
+        type.GetField(name, Hidden).SetValue(instance, value);
+    }
+
+    private static void Require(bool condition, string message)
+    {
+        if (!condition)
+        {
+            throw new Exception(message);
+        }
+    }
+}

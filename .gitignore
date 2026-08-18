@@ -1,0 +1,31 @@
+# Build outputs
+artifacts/
+artifacts-test/
+bin/
+obj/
+generated/
+generated-test/
+.vs/
+.vscode/
+
+# Locally supplied proprietary dependencies and generated projections
+CastleMinerZ.exe
+DNA.Common.dll
+*.winmd
+*.ocavatar
+
+# Never commit compiled release files
+*.dll
+*.exe
+*.pdb
+*.lib
+*.exp
+*.obj
+
+# Runtime state
+Cache/
+Backups/
+*.log
+*.dmp
+*.user
+*.suo
