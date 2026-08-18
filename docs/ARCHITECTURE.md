@@ -28,8 +28,8 @@ atomically replaces the previous imported avatar.
 - layered base, palette, and decal materials;
 - animated face masks and expressions;
 - first-person hand and sleeve projection;
-- proportion-aware held-item attachment that follows the imported wrist while
-  preserving Castle Miner Z's authored weapon grip offset;
+- proportion-aware held-item attachment targeting the imported avatar's live
+  finger-and-thumb grip center instead of its low invisible prop bone;
 - world and torch lighting;
 - stock-message capability negotiation, strictly gated reliable chunk
   transfer, validation, and caching.

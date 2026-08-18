@@ -290,29 +290,33 @@ namespace OpenClassic.XboxAvatar
             }
             try
             {
-                // Build the same proportion-aware pose used by the imported
-                // mesh. Follow the imported wrist height, but retain the
-                // stock wrist-to-prop grip offset used when Castle Miner Z's
-                // tools and guns were authored. This moves held items with a
-                // short/tall avatar without stretching the item or letting a
-                // larger Xbox hand push it below the grip.
+                // PropRight is an invisible Xbox attachment bone well below
+                // the rendered palm. Castle Miner Z's proxy hand was authored
+                // around that location, but a real Xbox avatar exposes its
+                // articulated digits there instead. Attach to the live center
+                // of the four finger bases plus the thumb so the final item is
+                // inside the visible grip for every height and hand shape.
                 BuildExportSpacePose();
-                Vector3 importedWrist = _exportPoseBones[
-                    (int)AvatarBone.WristRight].Translation;
                 Vector3 importedProp = _exportPoseBones[
                     (int)AvatarBone.PropRight].Translation;
-                importedWrist.Z = -importedWrist.Z;
                 importedProp.Z = -importedProp.Z;
-
-                Vector3 stockWrist = _avatar.GetBoneToAvatar(
-                    AvatarBone.WristRight).Translation;
-                Vector3 stockProp = _avatar.GetBoneToAvatar(
-                    AvatarBone.PropRight).Translation;
-                translation = ComputeThirdPersonPropTranslation(
-                    importedWrist,
+                Vector3 index = ExportBoneTranslation(
+                    AvatarBone.FingerIndexRight);
+                Vector3 middle = ExportBoneTranslation(
+                    AvatarBone.FingerMiddleRight);
+                Vector3 ring = ExportBoneTranslation(
+                    AvatarBone.FingerRingRight);
+                Vector3 small = ExportBoneTranslation(
+                    AvatarBone.FingerSmallRight);
+                Vector3 thumb = ExportBoneTranslation(
+                    AvatarBone.FingerThumbRight);
+                translation = ComputeThirdPersonGripTranslation(
                     importedProp,
-                    stockWrist,
-                    stockProp);
+                    index,
+                    middle,
+                    ring,
+                    small,
+                    thumb);
                 return IsFinite(translation);
             }
             catch (Exception exception)
@@ -322,26 +326,37 @@ namespace OpenClassic.XboxAvatar
             }
         }
 
-        internal static Vector3 ComputeThirdPersonPropTranslation(
-            Vector3 importedWrist,
-            Vector3 importedProp,
-            Vector3 stockWrist,
-            Vector3 stockProp)
+        private Vector3 ExportBoneTranslation(AvatarBone bone)
         {
-            if (!IsFinite(importedWrist) || !IsFinite(importedProp) ||
-                !IsFinite(stockWrist) || !IsFinite(stockProp))
+            Vector3 result = _exportPoseBones[(int)bone].Translation;
+            result.Z = -result.Z;
+            return result;
+        }
+
+        internal static Vector3 ComputeThirdPersonGripTranslation(
+            Vector3 importedProp,
+            Vector3 fingerIndex,
+            Vector3 fingerMiddle,
+            Vector3 fingerRing,
+            Vector3 fingerSmall,
+            Vector3 fingerThumb)
+        {
+            if (!IsFinite(importedProp) || !IsFinite(fingerIndex) ||
+                !IsFinite(fingerMiddle) || !IsFinite(fingerRing) ||
+                !IsFinite(fingerSmall) || !IsFinite(fingerThumb))
             {
                 return importedProp;
             }
 
-            Vector3 correction =
-                (stockProp - stockWrist) -
-                (importedProp - importedWrist);
+            Vector3 visibleGrip =
+                (fingerIndex + fingerMiddle + fingerRing +
+                 fingerSmall + fingerThumb) / 5f;
+            Vector3 correction = visibleGrip - importedProp;
 
-            // Malformed/custom skeletons must not throw a held item across
-            // the player. Eight centimetres comfortably covers the Xbox
-            // avatar hand-size range while bounding corrupt asset data.
-            const float maximumCorrection = 0.08f;
+            // Bound malformed/custom skeletons without restricting the real
+            // Xbox avatar range: PropRight commonly sits about 15 cm below the
+            // visible grip on tall models.
+            const float maximumCorrection = 0.22f;
             float lengthSquared = correction.LengthSquared();
             if (lengthSquared > maximumCorrection * maximumCorrection)
             {

@@ -49,38 +49,53 @@ internal static class AvatarAttachmentSmoke
 
         // Runtime export space reflects X/Z into Castle Miner Z space before
         // the attachment correction is evaluated.
-        Vector3 importedProp = new Vector3(
-            -sourceProp.X,
-            sourceProp.Y,
-            -sourceProp.Z);
-        Vector3 importedWrist = new Vector3(
-            -sourceWrist.X,
-            sourceWrist.Y,
-            -sourceWrist.Z);
+        Vector3 importedProp = ConvertExport(sourceProp);
+        Vector3 importedIndex = ConvertExport(
+            source[(int)AvatarBone.FingerIndexRight].Translation);
+        Vector3 importedMiddle = ConvertExport(
+            source[(int)AvatarBone.FingerMiddleRight].Translation);
+        Vector3 importedRing = ConvertExport(
+            source[(int)AvatarBone.FingerRingRight].Translation);
+        Vector3 importedSmall = ConvertExport(
+            source[(int)AvatarBone.FingerSmallRight].Translation);
+        Vector3 importedThumb = ConvertExport(
+            source[(int)AvatarBone.FingerThumbRight].Translation);
         Type entityType = mod.GetType(
             "OpenClassic.XboxAvatar.ImportedAvatarModelEntity",
             true);
         MethodInfo compute = entityType.GetMethod(
-            "ComputeThirdPersonPropTranslation",
+            "ComputeThirdPersonGripTranslation",
             Hidden);
         Vector3 corrected = (Vector3)compute.Invoke(
             null,
             new object[]
             {
-                importedWrist,
                 importedProp,
-                stockWrist,
-                stockProp
+                importedIndex,
+                importedMiddle,
+                importedRing,
+                importedSmall,
+                importedThumb
             });
         Require(IsFinite(corrected), "corrected PropRight is not finite");
+        Vector3 expectedGrip =
+            (importedIndex + importedMiddle + importedRing +
+             importedSmall + importedThumb) / 5f;
+        Require(Vector3.Distance(corrected, expectedGrip) < 0.0001f,
+            "item anchor did not move to the visible digit grip center");
+        Require(corrected.Y - importedProp.Y > 0.08f,
+            "item anchor remains below the visible hand");
+
+        // Pistols have an identity ItemUse.Hand child matrix, so this checks
+        // the final rendered pistol origin after the complete child-to-anchor
+        // transform chain rather than merely asserting a skeleton bone.
+        Matrix anchor = Matrix.Identity;
+        anchor.Translation = corrected;
+        Matrix finalPistol = Matrix.Identity * anchor;
         Require(Vector3.Distance(
-            corrected - importedWrist,
-            stockProp - stockWrist) < 0.0001f,
-            "corrected item anchor did not preserve the stock grip offset");
-        Require(Math.Abs(
-            (corrected.Y - stockProp.Y) -
-            (importedWrist.Y - stockWrist.Y)) < 0.0001f,
-            "corrected item anchor did not follow avatar wrist height");
+            finalPistol.Translation,
+            expectedGrip) < 0.0001f,
+            "final pistol entity did not reach the visible grip");
 
         Console.WriteLine(
             "PASS: proportion-aware third-person grip source=" + sourceProp +
@@ -90,6 +105,11 @@ internal static class AvatarAttachmentSmoke
             " wristOffset=" + (sourceProp - sourceWrist) +
             " stockWristOffset=" + (stockProp - stockWrist) + ".");
         return 0;
+    }
+
+    private static Vector3 ConvertExport(Vector3 source)
+    {
+        return new Vector3(-source.X, source.Y, -source.Z);
     }
 
     private static Matrix[] BuildCumulative(Matrix[] local)
