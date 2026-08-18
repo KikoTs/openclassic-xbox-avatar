@@ -103,6 +103,19 @@ foreach ($testName in @('AvatarProtocolSmoke', 'AvatarMessageIdSmoke')) {
     Invoke-Native "$testName compilation" { & $frameworkCsc $testArguments }
 }
 
+$attachmentTestSource = Join-Path $repoRoot 'tests\Attachment\AvatarAttachmentSmoke.cs'
+$attachmentTestOut = Join-Path $bin 'AvatarAttachmentSmoke.exe'
+$attachmentTestArguments = @(
+    '/nologo', '/target:exe', '/optimize+', '/platform:x86',
+    "/out:$attachmentTestOut",
+    "/reference:$commonDll",
+    "/reference:$xnaFramework",
+    $attachmentTestSource
+)
+Invoke-Native 'AvatarAttachmentSmoke compilation' {
+    & $frameworkCsc $attachmentTestArguments
+}
+
 $managerProject = Join-Path $repoRoot 'src\Manager\AvatarModPatcher.csproj'
 $managerPublish = Join-Path $obj 'manager-publish'
 Invoke-Native 'Manager publication' {

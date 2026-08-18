@@ -28,9 +28,11 @@ atomically replaces the previous imported avatar.
 - layered base, palette, and decal materials;
 - animated face masks and expressions;
 - first-person hand and sleeve projection;
-- held-item attachment based on the live avatar skeleton;
+- proportion-aware held-item attachment that follows the imported wrist while
+  preserving Castle Miner Z's authored weapon grip offset;
 - world and torch lighting;
-- capability negotiation, reliable chunk transfer, validation, and caching.
+- stock-message capability negotiation, strictly gated reliable chunk
+  transfer, validation, and caching.
 
 ## Local integration manager
 

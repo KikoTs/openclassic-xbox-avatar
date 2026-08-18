@@ -291,26 +291,74 @@ namespace OpenClassic.XboxAvatar
             try
             {
                 // Build the same proportion-aware pose used by the imported
-                // mesh, then expose its live PropRight position to the stock
-                // item entity. This keeps tools in the actual Xbox hand for
-                // short/tall and slim/heavy avatars without touching the
-                // already-stable first-person hand path.
+                // mesh. Follow the imported wrist height, but retain the
+                // stock wrist-to-prop grip offset used when Castle Miner Z's
+                // tools and guns were authored. This moves held items with a
+                // short/tall avatar without stretching the item or letting a
+                // larger Xbox hand push it below the grip.
                 BuildExportSpacePose();
-                translation = _exportPoseBones[
+                Vector3 importedWrist = _exportPoseBones[
+                    (int)AvatarBone.WristRight].Translation;
+                Vector3 importedProp = _exportPoseBones[
                     (int)AvatarBone.PropRight].Translation;
-                translation.Z = -translation.Z;
-                return !float.IsNaN(translation.X) &&
-                    !float.IsNaN(translation.Y) &&
-                    !float.IsNaN(translation.Z) &&
-                    !float.IsInfinity(translation.X) &&
-                    !float.IsInfinity(translation.Y) &&
-                    !float.IsInfinity(translation.Z);
+                importedWrist.Z = -importedWrist.Z;
+                importedProp.Z = -importedProp.Z;
+
+                Vector3 stockWrist = _avatar.GetBoneToAvatar(
+                    AvatarBone.WristRight).Translation;
+                Vector3 stockProp = _avatar.GetBoneToAvatar(
+                    AvatarBone.PropRight).Translation;
+                translation = ComputeThirdPersonPropTranslation(
+                    importedWrist,
+                    importedProp,
+                    stockWrist,
+                    stockProp);
+                return IsFinite(translation);
             }
             catch (Exception exception)
             {
                 WriteFailure(exception);
                 return false;
             }
+        }
+
+        internal static Vector3 ComputeThirdPersonPropTranslation(
+            Vector3 importedWrist,
+            Vector3 importedProp,
+            Vector3 stockWrist,
+            Vector3 stockProp)
+        {
+            if (!IsFinite(importedWrist) || !IsFinite(importedProp) ||
+                !IsFinite(stockWrist) || !IsFinite(stockProp))
+            {
+                return importedProp;
+            }
+
+            Vector3 correction =
+                (stockProp - stockWrist) -
+                (importedProp - importedWrist);
+
+            // Malformed/custom skeletons must not throw a held item across
+            // the player. Eight centimetres comfortably covers the Xbox
+            // avatar hand-size range while bounding corrupt asset data.
+            const float maximumCorrection = 0.08f;
+            float lengthSquared = correction.LengthSquared();
+            if (lengthSquared > maximumCorrection * maximumCorrection)
+            {
+                correction *= maximumCorrection /
+                    (float)Math.Sqrt(lengthSquared);
+            }
+            return importedProp + correction;
+        }
+
+        private static bool IsFinite(Vector3 value)
+        {
+            return !float.IsNaN(value.X) &&
+                !float.IsNaN(value.Y) &&
+                !float.IsNaN(value.Z) &&
+                !float.IsInfinity(value.X) &&
+                !float.IsInfinity(value.Y) &&
+                !float.IsInfinity(value.Z);
         }
 
         private int FindProxyBone(int avatarBone)
@@ -3190,10 +3238,10 @@ namespace OpenClassic.XboxAvatar
         }
     }
 
-    // Multiplayer protocol v1. The message type sorts after every stock
-    // DNA.CastleMinerZ message, so existing packet IDs remain byte-for-byte
-    // compatible. Vanilla peers discard the unknown handshake ID; avatar data
-    // is sent only after another modded peer explicitly requests it.
+    // Multiplayer protocol v1. Capability discovery uses a decorated copy of
+    // the stock PlayerExistsMessage, which vanilla and unmodified OpenClassic
+    // understand and safely ignore as a duplicate. The custom message type is
+    // never sent until a peer proves support with that stock-safe marker.
     public static class AvatarNetworkBridge
     {
         private const byte ProtocolVersion = 1;
@@ -3205,6 +3253,11 @@ namespace OpenClassic.XboxAvatar
         private const int MaximumAssetBytes = 4 * 1024 * 1024;
         private const int MaximumIncomingTransfers = 8;
         private const int ChunksPerUpdate = 2;
+        private static readonly byte[] CapabilityMarker =
+        {
+            0x4f, 0x43, 0x58, 0x41, 0x43, 0x41, 0x50,
+            ProtocolVersion
+        };
         private static readonly TimeSpan TransferTimeout = TimeSpan.FromSeconds(45);
         private static readonly Dictionary<byte, PlayerBinding> Players =
             new Dictionary<byte, PlayerBinding>();
@@ -3225,12 +3278,14 @@ namespace OpenClassic.XboxAvatar
         private static uint _nextTransferId = 1;
         private static DateTime _nextCleanupUtc = DateTime.MinValue;
         private static LocalSnapshot _localSnapshot;
+        private static bool _capabilityAdvertisementPending = true;
 
         public static void Register()
         {
             Assembly entry = Assembly.GetEntryAssembly();
             Assembly current = Assembly.GetExecutingAssembly();
             ReflectionTools.RegisterAssembly(entry ?? current, current);
+            _capabilityAdvertisementPending = true;
         }
 
         internal static void NotePlayer(
@@ -3273,25 +3328,12 @@ namespace OpenClassic.XboxAvatar
                 return;
             }
 
-            if (gamer.IsLocal)
-            {
-                NetworkSession session = CastleMinerZGame.Instance.CurrentNetworkSession;
-                if (session == null)
-                {
-                    return;
-                }
-                foreach (NetworkGamer peer in session.AllGamers)
-                {
-                    if (!peer.IsLocal && !peer.HasLeftSession)
-                    {
-                        QueueHello(peer);
-                    }
-                }
-            }
-            else
+            _capabilityAdvertisementPending = true;
+            if (!gamer.IsLocal)
             {
                 // Gamer IDs can be reused after a disconnect. Do not let a new
-                // player inherit the previous occupant's cached model binding.
+                // player inherit the previous occupant's cached model binding
+                // or protocol capability.
                 PlayerBinding binding;
                 if (Players.TryGetValue(gamer.Id, out binding) &&
                     binding.Gamer != gamer)
@@ -3299,12 +3341,35 @@ namespace OpenClassic.XboxAvatar
                     Players.Remove(gamer.Id);
                     RemoteAssetPaths.Remove(gamer.Id);
                 }
-                QueueHello(gamer);
+                PendingHello.Remove(gamer.Id);
+                HelloSent.Remove(gamer.Id);
+                PeerReady.Remove(gamer.Id);
             }
         }
 
         public static bool OnMessage(Message message)
         {
+            PlayerExistsMessage playerExists = message as PlayerExistsMessage;
+            if (playerExists != null)
+            {
+                if (playerExists.Sender != null &&
+                    !playerExists.Sender.IsLocal)
+                {
+                    byte[] cleanDescription;
+                    if (TryStripCapabilityMarker(
+                        playerExists.AvatarDescriptionData,
+                        out cleanDescription))
+                    {
+                        // Never let the add-on marker leak into normal game
+                        // avatar state, even though duplicate PlayerExists
+                        // packets are ignored after the player is constructed.
+                        playerExists.AvatarDescriptionData = cleanDescription;
+                        MarkPeerCapable(playerExists.Sender);
+                    }
+                }
+                return false;
+            }
+
             ZZOpenClassicAvatarSyncMessage packet =
                 message as ZZOpenClassicAvatarSyncMessage;
             if (packet == null)
@@ -3324,16 +3389,11 @@ namespace OpenClassic.XboxAvatar
                 return true;
             }
 
-            NetworkGamer ready;
-            if (!PeerReady.TryGetValue(packet.Sender.Id, out ready) ||
-                ready != packet.Sender)
+            if (!IsPeerCapable(packet.Sender))
             {
-                PeerReady[packet.Sender.Id] = packet.Sender;
-                // A host hello can arrive before the joining client is ready
-                // and be intentionally dropped above. Receiving any later mod
-                // packet proves both endpoints are ready, so repeat hello once
-                // in the opposite direction to recover that capability edge.
-                ZZOpenClassicAvatarSyncMessage.SendHello(local, packet.Sender);
+                // A custom packet without the stock-safe capability marker is
+                // stale, spoofed, or from an incompatible protocol revision.
+                return true;
             }
 
             switch (packet.Kind)
@@ -3362,6 +3422,7 @@ namespace OpenClassic.XboxAvatar
                 return;
             }
 
+            FlushCapabilityAdvertisement(local);
             FlushPendingHello(local);
 
             int sent = 0;
@@ -3424,20 +3485,122 @@ namespace OpenClassic.XboxAvatar
             PendingHello[gamer.Id] = gamer;
         }
 
-        private static void FlushPendingHello(LocalNetworkGamer local)
+        private static void MarkPeerCapable(NetworkGamer gamer)
         {
-            CastleMinerZGame game = CastleMinerZGame.Instance;
-            NetworkSession session = game == null
-                ? null
-                : game.CurrentNetworkSession;
-            if (session != null)
+            if (gamer == null || gamer.IsLocal || gamer.HasLeftSession)
             {
-                foreach (NetworkGamer peer in session.AllGamers)
+                return;
+            }
+            PeerReady[gamer.Id] = gamer;
+            QueueHello(gamer);
+        }
+
+        internal static bool IsPeerCapable(NetworkGamer gamer)
+        {
+            if (gamer == null || gamer.IsLocal || gamer.HasLeftSession)
+            {
+                return false;
+            }
+            NetworkGamer ready;
+            return PeerReady.TryGetValue(gamer.Id, out ready) &&
+                ready == gamer;
+        }
+
+        internal static byte[] AppendCapabilityMarker(byte[] description)
+        {
+            int descriptionLength = description == null
+                ? 0
+                : description.Length;
+            byte[] decorated = new byte[
+                descriptionLength + CapabilityMarker.Length];
+            if (descriptionLength > 0)
+            {
+                Buffer.BlockCopy(
+                    description,
+                    0,
+                    decorated,
+                    0,
+                    descriptionLength);
+            }
+            Buffer.BlockCopy(
+                CapabilityMarker,
+                0,
+                decorated,
+                descriptionLength,
+                CapabilityMarker.Length);
+            return decorated;
+        }
+
+        internal static bool TryStripCapabilityMarker(
+            byte[] decorated,
+            out byte[] description)
+        {
+            description = decorated;
+            if (decorated == null ||
+                decorated.Length < CapabilityMarker.Length)
+            {
+                return false;
+            }
+            int markerOffset = decorated.Length - CapabilityMarker.Length;
+            for (int index = 0; index < CapabilityMarker.Length; index++)
+            {
+                if (decorated[markerOffset + index] !=
+                    CapabilityMarker[index])
                 {
-                    QueueHello(peer);
+                    return false;
                 }
             }
+            description = new byte[markerOffset];
+            if (markerOffset > 0)
+            {
+                Buffer.BlockCopy(
+                    decorated,
+                    0,
+                    description,
+                    0,
+                    markerOffset);
+            }
+            return true;
+        }
 
+        private static void FlushCapabilityAdvertisement(
+            LocalNetworkGamer local)
+        {
+            if (!_capabilityAdvertisementPending || local == null)
+            {
+                return;
+            }
+            CastleMinerZGame game = CastleMinerZGame.Instance;
+            Player player = game == null ? null : game.LocalPlayer;
+            AvatarDescription description =
+                player == null || player.Avatar == null
+                    ? null
+                    : player.Avatar.Description;
+            if (description == null || description.Description == null)
+            {
+                return;
+            }
+
+            SendCapabilityAdvertisement(local, description.Description);
+            _capabilityAdvertisementPending = false;
+        }
+
+        internal static void SendCapabilityAdvertisement(
+            LocalNetworkGamer local,
+            byte[] description)
+        {
+            if (local == null || description == null)
+            {
+                return;
+            }
+            PlayerExistsMessage.Send(
+                local,
+                new AvatarDescription(AppendCapabilityMarker(description)),
+                false);
+        }
+
+        private static void FlushPendingHello(LocalNetworkGamer local)
+        {
             var ids = new List<byte>(PendingHello.Keys);
             foreach (byte id in ids)
             {
@@ -4053,6 +4216,7 @@ namespace OpenClassic.XboxAvatar
             byte[] payload)
         {
             if (from == null || to == null || to.HasLeftSession ||
+                !AvatarNetworkBridge.IsPeerCapable(to) ||
                 hash == null || hash.Length != 32 || payload == null ||
                 payload.Length > 3000)
             {

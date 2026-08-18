@@ -73,8 +73,8 @@ See [architecture](docs/ARCHITECTURE.md), [installation](docs/INSTALL.md),
 The v3 avatar format supports the assembled 71-bone model, height and build
 proportions, independent material/decal passes, facial layers and expressions,
 outfit sleeves, bare hands, fingerless gloves, full gloves, first-person hand
-projection, held-item attachment, world lighting, caching, and multiplayer
-transfer.
+projection, proportion-aware third-person held-item attachment, world
+lighting, caching, and vanilla-safe capability-gated multiplayer transfer.
 
 ## License
 

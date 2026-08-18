@@ -125,6 +125,56 @@ internal static class AvatarProtocolSmoke
         Type bridge = mod.GetType(
             "OpenClassic.XboxAvatar.AvatarNetworkBridge",
             true);
+
+        byte[] stockDescription = Enumerable.Range(0, 10)
+            .Select(index => (byte)(0x20 + index))
+            .ToArray();
+        MethodInfo appendMarker = bridge.GetMethod(
+            "AppendCapabilityMarker",
+            Hidden);
+        MethodInfo stripMarker = bridge.GetMethod(
+            "TryStripCapabilityMarker",
+            Hidden);
+        byte[] decoratedDescription = (byte[])appendMarker.Invoke(
+            null,
+            new object[] { stockDescription });
+        Require(decoratedDescription.Length == stockDescription.Length + 8,
+            "capability advertisement marker has an unexpected size");
+        object[] stripArguments = { decoratedDescription, null };
+        Require((bool)stripMarker.Invoke(null, stripArguments),
+            "valid capability advertisement was rejected");
+        Require(stockDescription.SequenceEqual((byte[])stripArguments[1]),
+            "capability marker stripping changed the stock description");
+        object[] plainArguments = { stockDescription, null };
+        Require(!(bool)stripMarker.Invoke(null, plainArguments),
+            "unmodified vanilla description was treated as mod-capable");
+        byte[] wrongVersion = (byte[])decoratedDescription.Clone();
+        wrongVersion[wrongVersion.Length - 1]++;
+        object[] wrongArguments = { wrongVersion, null };
+        Require(!(bool)stripMarker.Invoke(null, wrongArguments),
+            "incompatible capability protocol version was accepted");
+
+        MethodInfo sendPacket = packetType.GetMethod("SendPacket", Hidden);
+        MethodInfo isPeerCapable = bridge.GetMethod("IsPeerCapable", Hidden);
+        Require(Calls(sendPacket, isPeerCapable),
+            "custom packet sender has no final capability gate");
+
+        Assembly game = AppDomain.CurrentDomain.GetAssemblies()
+            .FirstOrDefault(value =>
+                value.GetName().Name == "CastleMinerZ") ??
+            Assembly.Load("CastleMinerZ");
+        Type playerExists = game.GetType(
+            "DNA.CastleMinerZ.Net.PlayerExistsMessage",
+            true);
+        MethodInfo stockPlayerExistsSend = playerExists.GetMethod(
+            "Send",
+            BindingFlags.Public | BindingFlags.Static);
+        MethodInfo advertise = bridge.GetMethod(
+            "SendCapabilityAdvertisement",
+            Hidden);
+        Require(Calls(advertise, stockPlayerExistsSend),
+            "capability advertisement does not use the stock message path");
+
         bridge.GetMethod("OnGamerJoined", Hidden).Invoke(null, new object[] { null });
         Require(!(bool)bridge.GetMethod("OnMessage", Hidden).Invoke(
             null,
@@ -133,9 +183,40 @@ internal static class AvatarProtocolSmoke
 
         Console.WriteLine(
             "PASS: v3 independent material passes/gloves, two head halves, 70-72 RGBA face layers, " +
-            "null-safe pre-join bridge, 3048-byte network round-trip, oversize " +
-            "rejection, and truncation rejection.");
+            "stock-safe capability advertisement, strict peer send gate, " +
+            "null-safe pre-join bridge, 3048-byte network round-trip, " +
+            "oversize rejection, and truncation rejection.");
         return 0;
+    }
+
+    private static bool Calls(MethodInfo source, MethodInfo target)
+    {
+        MethodBody body = source.GetMethodBody();
+        byte[] il = body == null ? null : body.GetILAsByteArray();
+        if (il == null)
+        {
+            return false;
+        }
+        for (int index = 0; index + 4 < il.Length; index++)
+        {
+            if (il[index] != 0x28 && il[index] != 0x6f)
+            {
+                continue;
+            }
+            int token = BitConverter.ToInt32(il, index + 1);
+            try
+            {
+                MethodBase called = source.Module.ResolveMethod(token);
+                if (called == target)
+                {
+                    return true;
+                }
+            }
+            catch (ArgumentException)
+            {
+            }
+        }
+        return false;
     }
 
     private static void ExpectFailure(
