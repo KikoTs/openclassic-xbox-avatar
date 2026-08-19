@@ -67,6 +67,16 @@ namespace OpenClassic.XboxAvatar
         /// </summary>
         internal enum Placement
         {
+            /// <summary>
+            /// The imported avatar's prop bone, rotation as well as position.
+            ///
+            /// The only one that also fixes the anchor's orientation, so it is
+            /// the only one that can seat every item at once: each item is
+            /// offset from the anchor by a different amount along the anchor's
+            /// own axes, so a wrong rotation misplaces each of them
+            /// differently and moves them all as the arm pitches.
+            /// </summary>
+            Hand,
             /// <summary>The imported avatar's finger-centre grip.</summary>
             Grip,
             /// <summary>The imported avatar's own PropRight attach bone.</summary>
@@ -79,8 +89,19 @@ namespace OpenClassic.XboxAvatar
 
         private static readonly List<KeyValuePair<float, Vector3>> Rows =
             new List<KeyValuePair<float, Vector3>>();
-        private static Placement _mode = Placement.Grip;
+
+        /// <summary>
+        /// Per-item-type nudges, keyed by the held entity's class name, as
+        /// printed in anchor-status.log. Each item sits at its own distance
+        /// from the anchor, so until the anchor is exactly right they need
+        /// different corrections; when it is, they all want zero.
+        /// </summary>
+        private static readonly Dictionary<string, Vector3> Items =
+            new Dictionary<string, Vector3>(StringComparer.OrdinalIgnoreCase);
+
+        private static Placement _mode = Placement.Hand;
         private static Vector3 _global;
+        private static bool _handSpace = true;
         private static DateTime _stampUtc;
         private static DateTime _nextCheckUtc = DateTime.MinValue;
         private static bool _loaded;
@@ -94,13 +115,44 @@ namespace OpenClassic.XboxAvatar
             }
         }
 
+        /// <summary>
+        /// Whether a nudge is measured along the hand's own axes rather than
+        /// the world's. In hand space one value stays correct at every view
+        /// pitch; in avatar space the same value drifts as the arm swings,
+        /// which is what "it changes when I look up" was.
+        /// </summary>
+        internal static bool NudgeInHandSpace
+        {
+            get
+            {
+                Refresh();
+                return _handSpace;
+            }
+        }
+
+        /// <summary>The nudge for one held item class, on top of the rest.</summary>
+        internal static Vector3 OffsetForItem(string itemTypeName)
+        {
+            Refresh();
+            Vector3 offset;
+            return itemTypeName != null &&
+                Items.TryGetValue(itemTypeName, out offset)
+                ? offset
+                : Vector3.Zero;
+        }
+
         /// <summary>What the tuning file currently holds, for the status log.</summary>
         internal static string Describe()
         {
             Refresh();
             var text = new System.Text.StringBuilder();
             text.Append("mode=").Append(_mode.ToString().ToLowerInvariant());
+            text.Append(" space=").Append(_handSpace ? "hand" : "avatar");
             text.Append(" offset=").Append(_global);
+            foreach (KeyValuePair<string, Vector3> item in Items)
+            {
+                text.Append(" ").Append(item.Key).Append("=").Append(item.Value);
+            }
             if (Rows.Count == 0)
             {
                 text.Append(" (no per-build rows)");
@@ -202,8 +254,10 @@ namespace OpenClassic.XboxAvatar
         private static void Parse(string[] lines)
         {
             Rows.Clear();
-            _mode = Placement.Grip;
+            Items.Clear();
+            _mode = Placement.Hand;
             _global = Vector3.Zero;
+            _handSpace = true;
             foreach (string raw in lines)
             {
                 string line = raw.Trim();
@@ -245,6 +299,26 @@ namespace OpenClassic.XboxAvatar
                         StringComparison.OrdinalIgnoreCase))
                 {
                     _global = ParseVector(parts);
+                    continue;
+                }
+
+                if (string.Equals(parts[0], "space",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    _handSpace = !string.Equals(parts[1], "avatar",
+                        StringComparison.OrdinalIgnoreCase);
+                    continue;
+                }
+
+                if (string.Equals(parts[0], "item",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    parts.Length >= 3)
+                {
+                    // "item BlockEntity 0 -0.02 0": shift the columns along by
+                    // one so the shared vector parser sees the same shape.
+                    var tail = new string[parts.Length - 1];
+                    Array.Copy(parts, 1, tail, 0, tail.Length);
+                    Items[parts[1]] = ParseVector(tail);
                     continue;
                 }
 
@@ -316,16 +390,22 @@ namespace OpenClassic.XboxAvatar
                 "",
                 "# 1. Which point the item is anchored to.",
                 "#",
-                "#      mode grip    the avatar's own fingers          (default)",
-                "#      mode prop    the avatar's own attach bone",
+                "#      mode hand    the avatar's hand, rotation too  (default)",
+                "#      mode grip    the avatar's fingers, position only",
+                "#      mode prop    the avatar's attach bone, position only",
                 "#      mode shift   stock anchor, nudged by the hand offset",
                 "#      mode stock   untouched game placement, as a baseline",
                 "#",
-                "# If the item is in the wrong place, try these four before",
-                "# reaching for numbers below: they move it much further than",
-                "# any nudge, and which one looks right says where the bug is.",
+                "# 'hand' is the only one that also corrects the anchor's",
+                "# ROTATION, and only that can seat every item at once. Each",
+                "# item sits a different distance out from the anchor - a gun at",
+                "# 0 cm, a pickaxe at 11, a block at 7 - so a wrong rotation",
+                "# misplaces each of them by a different amount and swings them",
+                "# all as the arm pitches. If one item is right and the others",
+                "# are not, or things shift when you look up, that is rotation,",
+                "# and no amount of nudging below will fix it.",
                 "",
-                "mode grip",
+                "mode hand",
                 "",
                 "# 2. A nudge applied to every avatar, whatever its height.",
                 "# +Y raises the item, -Y lowers it. Metres, so 0.01 is 1 cm.",
@@ -336,8 +416,25 @@ namespace OpenClassic.XboxAvatar
                 "",
                 "offset 0.0",
                 "",
-                "# 3. Per-height nudges, on top of the one above. One row per",
-                "# build, interpolated in between so the item does not jump.",
+                "# Nudges are measured along the hand's own axes, so one value",
+                "# stays right at every view pitch. 'space avatar' measures them",
+                "# along the world's axes instead, which drifts as the arm",
+                "# swings.",
+                "#",
+                "#     space hand           or      space avatar",
+                "",
+                "space hand",
+                "",
+                "# 3. Per-item nudges, on top of the one above, for when one",
+                "# item still sits differently from the rest. The name is the",
+                "# class printed as child0= in anchor-status.log.",
+                "#",
+                "#     item  BlockEntity           0  -0.02  0",
+                "#     item  CastleMinerToolModel  0  -0.01  0",
+                "#     item  GunEntity             0   0     0",
+                "",
+                "# 4. Per-height nudges, on top of the rest. One row per build,",
+                "# interpolated in between so the item does not jump.",
                 "#",
                 "#     build  offsetY       or      build  offsetX  offsetY  offsetZ",
                 "#",
@@ -778,6 +875,49 @@ namespace OpenClassic.XboxAvatar
             catch (Exception exception)
             {
                 WriteFailure(exception);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// A bone of the imported skeleton as a full transform in avatar space:
+        /// its rotation as well as its position.
+        ///
+        /// Every held item is offset and rotated from the anchor along the
+        /// anchor's own axes, so the anchor's rotation matters as much as its
+        /// position - a rotation taken from the stock rig turns into a
+        /// position error proportional to each item's own offset. That is why
+        /// a gun, which sits exactly at the anchor, looked right while a
+        /// pickaxe 11 cm out and a block 7 cm out each needed a different
+        /// correction, and why all of them shifted when the arm pitched.
+        ///
+        /// The imported mesh is drawn through RenderWorld, which is avatar
+        /// space with Z negated. Conjugating by that reflection rather than
+        /// merely applying it keeps the result a true rotation instead of a
+        /// mirror, which would turn the item model inside out.
+        /// </summary>
+        internal bool TryGetAvatarSpaceBoneTransform(
+            AvatarBone bone,
+            out Matrix transform)
+        {
+            transform = Matrix.Identity;
+            if (_avatar == null || _exportPoseBones == null ||
+                (int)bone >= _exportPoseBones.Length)
+            {
+                return false;
+            }
+            try
+            {
+                BuildExportSpacePose();
+                Matrix reflectionZ = Matrix.CreateScale(1f, 1f, -1f);
+                transform =
+                    reflectionZ * _exportPoseBones[(int)bone] * reflectionZ;
+                return IsFinite(transform.Translation) &&
+                    IsFinite(transform.Forward) &&
+                    IsFinite(transform.Up);
+            }
+            catch
+            {
                 return false;
             }
         }
@@ -4329,6 +4469,19 @@ namespace OpenClassic.XboxAvatar
                 // judged against.
                 Vector3 stockAnchor = transform.Translation;
 
+                // The held item and how far it sits from the anchor. Each item
+                // class picks its own offset, so this is what turns an error in
+                // the anchor's rotation into a visible error in position, and
+                // it is the key a per-item nudge is looked up by.
+                bool haveChild =
+                    itemAnchor.Children != null && itemAnchor.Children.Count > 0;
+                Vector3 childOffset = haveChild
+                    ? itemAnchor.Children[0].LocalToParent.Translation
+                    : Vector3.Zero;
+                string childTypeName = haveChild
+                    ? itemAnchor.Children[0].GetType().Name
+                    : "none";
+
                 // Third person only. First person keeps the stock anchor: the
                 // viewmodel hand is drawn by a different path with its own
                 // scaling, so moving the anchor there lifted the held item off
@@ -4367,11 +4520,19 @@ namespace OpenClassic.XboxAvatar
                 }
 
                 // Which of these closes the gap is a question about pixels, so
-                // it is left switchable rather than settled by argument. The
-                // absolute grip is the default because it is the only one that
-                // follows the imported body's height at all: the shift is the
-                // same few centimetres whether the avatar is short or tall.
+                // it is left switchable rather than settled by argument.
+                //
+                // Only "hand" replaces the anchor's rotation as well as its
+                // position, and only that can seat every item at once: each
+                // item is offset from the anchor by a different amount along
+                // the anchor's own axes, so a stock rotation misplaces each of
+                // them by a different distance and swings them all as the arm
+                // pitches. The position-only modes can be tuned to suit one
+                // item, never all of them.
                 Vector3 placed;
+                Matrix handToAvatar;
+                bool haveHand = imported.TryGetAvatarSpaceBoneTransform(
+                    AvatarBone.PropRight, out handToAvatar);
                 switch (ItemTuning.Mode)
                 {
                     case ItemTuning.Placement.Stock:
@@ -4383,22 +4544,34 @@ namespace OpenClassic.XboxAvatar
                     case ItemTuning.Placement.Prop:
                         placed = haveImportedProp ? importedProp : target;
                         break;
+                    case ItemTuning.Placement.Hand:
+                        if (haveHand)
+                        {
+                            // Keep the imported rotation, and with it the
+                            // scale-free axes every item offset is measured
+                            // against.
+                            transform = handToAvatar;
+                        }
+                        placed = haveHand ? handToAvatar.Translation : target;
+                        break;
                     default:
                         placed = target;
                         break;
                 }
 
-                transform.Translation =
-                    placed
-                    // Editable nudge, for trimming the fit without a rebuild.
-                    // Zero unless the tuning file says otherwise.
-                    + ItemTuning.OffsetFor(shape);
-
-                Vector3 childOffset = Vector3.Zero;
-                if (itemAnchor.Children != null && itemAnchor.Children.Count > 0)
+                // Editable nudge, for trimming the fit without a rebuild. Zero
+                // unless the tuning file says otherwise. Measured along the
+                // hand's own axes by default so one value stays right at every
+                // view pitch instead of drifting as the arm swings.
+                Vector3 nudge =
+                    ItemTuning.OffsetFor(shape) +
+                    ItemTuning.OffsetForItem(childTypeName);
+                if (ItemTuning.NudgeInHandSpace)
                 {
-                    childOffset = itemAnchor.Children[0].LocalToParent.Translation;
+                    nudge = Vector3.TransformNormal(nudge, transform);
                 }
+
+                transform.Translation = placed + nudge;
 
                 itemAnchor.LocalToParent = transform;
 
@@ -4431,7 +4604,7 @@ namespace OpenClassic.XboxAvatar
                     " shiftLen=" + propToGrip.Length().ToString("F4") +
                     // Echo the tuning actually in force, so a saved edit can be
                     // confirmed as picked up without restarting anything.
-                    " tuning=" + ItemTuning.OffsetFor(shape) +
+                    " tuning=" + nudge +
                     (haveWrist
                         ? " gripToWrist=" + Vector3.Distance(target, wrist).ToString("F4")
                         : " wrist=?") +
@@ -4439,9 +4612,7 @@ namespace OpenClassic.XboxAvatar
                         ? " gripToProp=" + Vector3.Distance(target, prop).ToString("F4")
                         : " prop=?") +
                     " childOffset=" + childOffset +
-                    " child0=" + (itemAnchor.Children != null && itemAnchor.Children.Count > 0
-                        ? itemAnchor.Children[0].GetType().Name
-                        : "none"));
+                    " child0=" + childTypeName);
             }
         }
 
