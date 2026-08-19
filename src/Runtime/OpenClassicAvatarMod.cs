@@ -2497,7 +2497,16 @@ namespace OpenClassic.XboxAvatar
                 int version = reader.ReadInt32();
                 if (version < 1 || version > 4)
                 {
-                    throw new InvalidDataException("Unsupported Xbox Avatar asset version " + version + ".");
+                    // Say what this actually means. An avatar arriving from a
+                    // peer is that peer's file, so an unknown version means the
+                    // two machines are on different builds of the add-on - which
+                    // presents as a stock character and looks like broken
+                    // syncing rather than a version mismatch.
+                    throw new InvalidDataException(
+                        "Unsupported Xbox Avatar asset version " + version +
+                        "; this build reads up to 4. If the avatar came from" +
+                        " another player, that player is running a different" +
+                        " build of the add-on and both machines need the same one.");
                 }
                 int boneCount = reader.ReadInt32();
                 if (boneCount != 71)
@@ -3674,6 +3683,12 @@ namespace OpenClassic.XboxAvatar
         // capable peer, so it refuses to serve us and we never ask again.
         private static bool _capabilityAdvertised;
 
+        // How long to hold hellos back waiting for our own marker before giving
+        // up and asking anyway. Short enough not to be noticed, long enough to
+        // cover a normal join.
+        private const double HelloGateSeconds = 5.0;
+        private static DateTime _helloGateDeadlineUtc = DateTime.MinValue;
+
         public static void Register()
         {
             Assembly entry = Assembly.GetEntryAssembly();
@@ -3729,6 +3744,7 @@ namespace OpenClassic.XboxAvatar
                 // previous one, so re-prove ourselves before asking anybody for
                 // an avatar, or the second session repeats the first-join bug.
                 _capabilityAdvertised = false;
+                _helloGateDeadlineUtc = DateTime.UtcNow.AddSeconds(HelloGateSeconds);
                 DeferredHello.Clear();
             }
             else
@@ -3837,12 +3853,20 @@ namespace OpenClassic.XboxAvatar
 
             FlushCapabilityAdvertisement(local);
 
-            // Only ask for avatars once our own marker is on the wire. Until
-            // then a peer cannot recognise us as capable and would refuse, and
-            // we never ask a second time. The advert waits on the local player
-            // existing, which on a joining client is well after the peers'
-            // adverts have already arrived.
-            if (_capabilityAdvertised)
+            // Prefer to ask for avatars only once our own marker is on the wire,
+            // because a peer cannot recognise us as capable before that and
+            // would refuse. But never let that preference become a hard
+            // requirement: the advertisement has several ways to keep returning
+            // early - no local player yet, or no avatar description on it - and
+            // making hellos wait on it means an avatar that never advertises
+            // also never asks, so nobody's avatar ever appears. Fall back to
+            // asking anyway, which is what this did before the ordering fix, and
+            // is strictly better than silence.
+            if (_helloGateDeadlineUtc == DateTime.MinValue)
+            {
+                _helloGateDeadlineUtc = DateTime.UtcNow.AddSeconds(HelloGateSeconds);
+            }
+            if (_capabilityAdvertised || DateTime.UtcNow >= _helloGateDeadlineUtc)
             {
                 FlushPendingHello(local);
             }
