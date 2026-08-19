@@ -874,8 +874,8 @@ namespace
         std::error_code error;
         fs::create_directories(localState, error);
 
-        std::wofstream log(localState / L"OpenClassicAvatarBridge.log", std::ios::trunc);
-        Log(log, L"OpenClassic avatar bridge started inside Xbox Original Avatars.");
+        std::wofstream log(localState / L"AvatarBridge.log", std::ios::trunc);
+        Log(log, L"Avatar bridge started inside Xbox Original Avatars.");
 
         try
         {
@@ -913,7 +913,7 @@ namespace
                 return 1;
             }
 
-            const std::wstring exportRelativeFolder = L"OpenClassicExportTest";
+            const std::wstring exportRelativeFolder = L"AvatarExport";
             const fs::path temporaryFolder =
                 fs::path(winrt::Windows::Storage::ApplicationData::Current()
                              .TemporaryFolder()
@@ -924,8 +924,8 @@ namespace
             {
                 const std::wstring name = entry.path().filename().wstring();
                 if (entry.is_regular_file() &&
-                    (name.starts_with(L"OpenClassic-selected-") ||
-                     name == L"OpenClassic-poses.txt"))
+                    (name.starts_with(L"avatar-selected-") ||
+                     name == L"avatar-poses.txt"))
                 {
                     fs::remove(entry.path(), error);
                     error.clear();
@@ -1119,7 +1119,7 @@ namespace
                             try
                             {
                                 poseAction = proxy.ExportPoses_PRIVATEAPI(
-                                    L"", L"OpenClassic-poses");
+                                    L"", L"avatar-poses");
                                 Log(log, L"Pose export started.");
                             }
                             catch (const winrt::hresult_error& exception)
@@ -1174,7 +1174,7 @@ namespace
                                 try
                                 {
                                     const std::wstring fileName =
-                                        std::wstring(L"OpenClassic-selected-") + target.name;
+                                        std::wstring(L"avatar-selected-") + target.name;
                                     categoryAction = proxy.ExportAssets_PRIVATEAPI(
                                         exportRelativeFolder,
                                         fileName,
@@ -1260,7 +1260,7 @@ namespace
     }
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI StartOpenClassicAvatarExport(void*)
+extern "C" __declspec(dllexport) DWORD WINAPI StartAvatarExport(void*)
 {
     if (InterlockedCompareExchange(&g_bridgeRunning, 1, 0) != 0)
     {
@@ -1280,7 +1280,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void*)
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(instance);
-        StartOpenClassicAvatarExport(nullptr);
+        StartAvatarExport(nullptr);
     }
     return TRUE;
 }

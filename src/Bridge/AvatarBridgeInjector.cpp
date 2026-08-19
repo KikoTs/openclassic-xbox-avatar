@@ -173,12 +173,12 @@ int wmain(int argc, wchar_t* argv[])
         CloseHandle(process);
         return Fail(L"Locating the bridge module");
     }
-    FARPROC localStart = GetProcAddress(localModule, "StartOpenClassicAvatarExport");
+    FARPROC localStart = GetProcAddress(localModule, "StartAvatarExport");
     if (!localStart)
     {
         FreeLibrary(localModule);
         CloseHandle(process);
-        return Fail(L"GetProcAddress(StartOpenClassicAvatarExport)");
+        return Fail(L"GetProcAddress(StartAvatarExport)");
     }
     const uintptr_t startRva =
         reinterpret_cast<uintptr_t>(localStart) - reinterpret_cast<uintptr_t>(localModule);

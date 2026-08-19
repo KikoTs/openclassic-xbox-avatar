@@ -1,7 +1,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$GameDirectory
+    [string]$GameDirectory,
+
+    # Which product this build ships as. 'XboxAvatar' is the standalone
+    # installer's brand: its own namespace, game-folder layout and file names,
+    # with no OpenClassic naming anywhere in the shipped binaries.
+    [ValidateSet('OpenClassic', 'XboxAvatar')]
+    [string]$Brand = 'OpenClassic'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,6 +45,17 @@ function Test-ModernModelEntity {
     }
     return $false
 }
+
+if ($Brand -eq 'XboxAvatar') {
+    $brandDefines = @('XBOX_AVATAR_BRAND')
+    $runtimeName = 'XboxAvatarMod.dll'
+    $managerName = 'Xbox Avatar Manager.exe'
+} else {
+    $brandDefines = @()
+    $runtimeName = 'OpenClassicAvatarMod.dll'
+    $managerName = 'OpenClassic Xbox Avatar Manager.exe'
+}
+Write-Host "Building as brand '$Brand' (runtime: $runtimeName)." -ForegroundColor Cyan
 
 $modernModelEntity = Test-ModernModelEntity -Assembly $gameExe
 if ($modernModelEntity) {
@@ -95,7 +112,7 @@ $xnaFramework = Find-XnaAssembly 'Microsoft.Xna.Framework'
 $xnaGraphics = Find-XnaAssembly 'Microsoft.Xna.Framework.Graphics'
 $xnaGame = Find-XnaAssembly 'Microsoft.Xna.Framework.Game'
 
-$runtimeOut = Join-Path $bin 'OpenClassicAvatarMod.dll'
+$runtimeOut = Join-Path $bin $runtimeName
 $runtimeSource = Join-Path $repoRoot 'src\Runtime\OpenClassicAvatarMod.cs'
 $runtimeArguments = @(
     '/nologo', '/target:library', '/optimize+', '/platform:x86',
@@ -110,6 +127,9 @@ $runtimeArguments = @(
 if ($modernModelEntity) {
     $runtimeArguments = @('/define:CMZ_MODERN_MODEL_ENTITY') + $runtimeArguments
 }
+foreach ($brandDefine in $brandDefines) {
+    $runtimeArguments = @("/define:$brandDefine") + $runtimeArguments
+}
 Invoke-Native 'Runtime compilation' { & $frameworkCsc $runtimeArguments }
 
 $importerOut = Join-Path $bin 'Import Xbox Avatar.exe'
@@ -122,6 +142,9 @@ $importerArguments = @(
     '/reference:System.Web.Extensions.dll',
     $importerSource
 )
+foreach ($brandDefine in $brandDefines) {
+    $importerArguments = @("/define:$brandDefine") + $importerArguments
+}
 Invoke-Native 'Importer compilation' { & $frameworkCsc $importerArguments }
 
 foreach ($testName in @('AvatarProtocolSmoke', 'AvatarMessageIdSmoke')) {
@@ -161,7 +184,7 @@ Invoke-Native 'Manager publication' {
         -o $managerPublish
 }
 Copy-Item -LiteralPath (Join-Path $managerPublish 'AvatarModPatcher.exe') `
-    -Destination (Join-Path $bin 'OpenClassic Xbox Avatar Manager.exe')
+    -Destination (Join-Path $bin $managerName)
 
 $avatarPackage = Get-AppxPackage -Name 'Microsoft.Avatars' |
     Sort-Object Version -Descending |

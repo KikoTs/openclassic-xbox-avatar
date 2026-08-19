@@ -21,9 +21,7 @@ internal static class AvatarAttachmentSmoke
         }
 
         Assembly mod = Assembly.LoadFrom(Path.GetFullPath(args[0]));
-        Type assetType = mod.GetType(
-            "OpenClassic.XboxAvatar.AvatarAsset",
-            true);
+        Type assetType = ModType(mod, "AvatarAsset");
         object asset = assetType.GetMethod("Load", Hidden).Invoke(
             null,
             new object[] { Path.GetFullPath(args[1]) });
@@ -60,9 +58,7 @@ internal static class AvatarAttachmentSmoke
             source[(int)AvatarBone.FingerSmallRight].Translation);
         Vector3 importedThumb = ConvertExport(
             source[(int)AvatarBone.FingerThumbRight].Translation);
-        Type entityType = mod.GetType(
-            "OpenClassic.XboxAvatar.ImportedAvatarModelEntity",
-            true);
+        Type entityType = ModType(mod, "ImportedAvatarModelEntity");
         MethodInfo compute = entityType.GetMethod(
             "ComputeThirdPersonGripTranslation",
             Hidden);
@@ -137,5 +133,25 @@ internal static class AvatarAttachmentSmoke
         {
             throw new Exception(message);
         }
+    }
+
+    // Resolve a mod type by its simple name. The runtime ships under more than
+    // one brand, so its namespace is not fixed and must not be hard-coded here.
+    private static Type ModType(Assembly mod, string simpleName)
+    {
+        // Enumerating every type would need each dependency loadable in this
+        // reflection-only context, so probe the known brand namespaces instead.
+        string[] namespaces = { "XboxAvatar", "OpenClassic.XboxAvatar" };
+        foreach (string space in namespaces)
+        {
+            Type candidate = mod.GetType(space + "." + simpleName, false);
+            if (candidate != null)
+            {
+                return candidate;
+            }
+        }
+        // All probes returned null. Re-ask with throwOnError so the real reason
+        // (usually an unresolvable base type) surfaces instead of a bare null.
+        return mod.GetType(namespaces[0] + "." + simpleName, true);
     }
 }

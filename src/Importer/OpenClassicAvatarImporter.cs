@@ -12,9 +12,41 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-internal static class OpenClassicAvatarImporter
+internal static class AvatarImporter
 {
     private const string PackageName = "Microsoft.Avatars_8wekyb3d8bbwe";
+
+    // Matches the runtime's Branding block. build.ps1 defines XBOX_AVATAR_BRAND
+    // for the standalone build, which ships under its own name.
+#if XBOX_AVATAR_BRAND
+    private const string ProductName = "Xbox Avatar";
+    private static readonly string[] AvatarSegments = { "Xbox Avatar" };
+    private static readonly string[] BridgeSegments = { "Xbox Avatar", "Bridge" };
+#else
+    private const string ProductName = "OpenClassic Xbox Avatar";
+    private static readonly string[] AvatarSegments = { "OpenClassic Addons", "Xbox Avatar" };
+    private static readonly string[] BridgeSegments = { "OpenClassic Addons", "Xbox Avatar Bridge" };
+#endif
+
+    private static string AvatarFolder(string gameFolder)
+    {
+        return CombineSegments(gameFolder, AvatarSegments);
+    }
+
+    private static string BridgeFolder(string gameFolder)
+    {
+        return CombineSegments(gameFolder, BridgeSegments);
+    }
+
+    private static string CombineSegments(string root, string[] segments)
+    {
+        string path = root;
+        for (int index = 0; index < segments.Length; index++)
+        {
+            path = Path.Combine(path, segments[index]);
+        }
+        return path;
+    }
 
     [STAThread]
     private static int Main(string[] args)
@@ -36,12 +68,12 @@ internal static class OpenClassicAvatarImporter
         try
         {
             string gameFolder = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
-            string bridgeFolder = Path.Combine(gameFolder, "OpenClassic Addons", "Xbox Avatar Bridge");
+            string bridgeFolder = BridgeFolder(gameFolder);
             string bridgeDll = Path.Combine(bridgeFolder, "AvatarBridge.dll");
             string injector = Path.Combine(bridgeFolder, "AvatarBridgeInjector.exe");
             if (!File.Exists(bridgeDll) || !File.Exists(injector))
             {
-                throw new FileNotFoundException("The Xbox Avatar Bridge files are missing. Reinstall the OpenClassic Xbox Avatar add-on.");
+                throw new FileNotFoundException("The Xbox Avatar Bridge files are missing. Reinstall the " + ProductName + " add-on.");
             }
 
             Process editor = FindOrLaunchEditor();
@@ -49,7 +81,7 @@ internal static class OpenClassicAvatarImporter
                 "Choose the avatar you want in Xbox Original Avatars.\n\n" +
                 "When that avatar is visible in the editor, click OK. The importer will do the rest automatically.\n\n" +
                 "No Intel GPA, Blender, or manual model conversion is needed.",
-                "Import Xbox Avatar into OpenClassic",
+                "Import Xbox Avatar into " + ProductName,
                 MessageBoxButtons.OKCancel,
                 MessageBoxIcon.Information);
             if (answer != DialogResult.OK)
@@ -68,13 +100,13 @@ internal static class OpenClassicAvatarImporter
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "Packages",
                 PackageName);
-            string logPath = Path.Combine(packageFolder, "AC", "OpenClassicAvatarBridge.log");
+            string logPath = Path.Combine(packageFolder, "AC", "AvatarBridge.log");
             DateTime startedUtc = DateTime.UtcNow;
             RunInjector(injector, editor.Id, bridgeDll);
             WaitForExport(logPath, startedUtc);
 
             string tempState = Path.Combine(packageFolder, "TempState");
-            string targetFolder = Path.Combine(gameFolder, "OpenClassic Addons", "Xbox Avatar");
+            string targetFolder = AvatarFolder(gameFolder);
             Directory.CreateDirectory(targetFolder);
             string temporaryAsset = Path.Combine(targetFolder, "avatar.ocavatar.new");
             string finalAsset = Path.Combine(targetFolder, "avatar.ocavatar");
@@ -89,8 +121,8 @@ internal static class OpenClassicAvatarImporter
             }
 
             MessageBox.Show(
-                "Your current Xbox avatar is installed for OpenClassic.\n\n" +
-                "Start CastleMiner Z and your character will use it. Other players running the OpenClassic Xbox Avatar mod will receive it automatically. Run this importer again whenever you change avatars.",
+                "Your current Xbox avatar is installed for " + ProductName + ".\n\n" +
+                "Start CastleMiner Z and your character will use it. Other players running the same add-on will receive it automatically. Run this importer again whenever you change avatars.",
                 "Xbox Avatar imported",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
@@ -211,9 +243,9 @@ internal static class OpenClassicAvatarImporter
 
     private static void ConvertExport(string tempState, string outputPath)
     {
-        string posesPath = Path.Combine(tempState, "OpenClassic-poses.txt");
-        string textureFolder = Path.Combine(tempState, "OpenClassicExportTest", "textures");
-        string[] jsonFiles = Directory.GetFiles(tempState, "OpenClassic-selected-*.json")
+        string posesPath = Path.Combine(tempState, "avatar-poses.txt");
+        string textureFolder = Path.Combine(tempState, "AvatarExport", "textures");
+        string[] jsonFiles = Directory.GetFiles(tempState, "avatar-selected-*.json")
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         if (!File.Exists(posesPath) || jsonFiles.Length == 0)

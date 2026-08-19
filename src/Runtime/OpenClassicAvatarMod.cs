@@ -26,8 +26,54 @@ using StockModelEntity = DNA.CastleMinerZ.PlayerModelEntity;
 using StockModelEntity = DNA.Avatars.AvatarModelEntity;
 #endif
 
+// The standalone installer ships this runtime under its own name, so the
+// namespace, the game-folder layout and the user-facing product name are all
+// selected here. build.ps1 defines XBOX_AVATAR_BRAND for that build.
+//
+// The namespace is part of the brand because patching writes it into the game
+// assembly's metadata: an OpenClassic-named hook would be visible in any
+// decompiler looking at a standalone install.
+#if XBOX_AVATAR_BRAND
+namespace XboxAvatar
+#else
 namespace OpenClassic.XboxAvatar
+#endif
 {
+    internal static class Branding
+    {
+#if XBOX_AVATAR_BRAND
+        internal const string ProductName = "Xbox Avatar";
+        private static readonly string[] AvatarSegments = { "Xbox Avatar" };
+        private static readonly string[] BridgeSegments = { "Xbox Avatar", "Bridge" };
+#else
+        internal const string ProductName = "OpenClassic Xbox Avatar";
+        private static readonly string[] AvatarSegments = { "OpenClassic Addons", "Xbox Avatar" };
+        private static readonly string[] BridgeSegments = { "OpenClassic Addons", "Xbox Avatar Bridge" };
+#endif
+
+        /// <summary>Where the imported avatar, caches, backups and logs live.</summary>
+        internal static string AvatarFolder(string gameFolder)
+        {
+            return Combine(gameFolder, AvatarSegments);
+        }
+
+        /// <summary>Where the native capture bridge lives.</summary>
+        internal static string BridgeFolder(string gameFolder)
+        {
+            return Combine(gameFolder, BridgeSegments);
+        }
+
+        private static string Combine(string root, string[] segments)
+        {
+            string path = root;
+            for (int index = 0; index < segments.Length; index++)
+            {
+                path = Path.Combine(path, segments[index]);
+            }
+            return path;
+        }
+    }
+
     public static class AvatarEntityFactory
     {
         // Returns the shared SkinnedModelEntity base rather than the concrete
@@ -662,10 +708,7 @@ namespace OpenClassic.XboxAvatar
                         }
                     }
                 }
-                string folder = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "OpenClassic Addons",
-                    "Xbox Avatar");
+                string folder = Branding.AvatarFolder(AppDomain.CurrentDomain.BaseDirectory);
                 Directory.CreateDirectory(folder);
                 string carrierStatus = string.Empty;
                 for (int partIndex = 0;
@@ -773,10 +816,7 @@ namespace OpenClassic.XboxAvatar
                     }
                 }
 
-                string folder = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "OpenClassic Addons",
-                    "Xbox Avatar");
+                string folder = Branding.AvatarFolder(AppDomain.CurrentDomain.BaseDirectory);
                 File.WriteAllText(
                     Path.Combine(folder, "renderer-status.log"),
                     "hideHead=true" + Environment.NewLine +
@@ -1224,10 +1264,7 @@ namespace OpenClassic.XboxAvatar
         {
             try
             {
-                string folder = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "OpenClassic Addons",
-                    "Xbox Avatar");
+                string folder = Branding.AvatarFolder(AppDomain.CurrentDomain.BaseDirectory);
                 Directory.CreateDirectory(folder);
                 File.AppendAllText(
                     Path.Combine(folder, "renderer.log"),
@@ -3406,8 +3443,8 @@ namespace OpenClassic.XboxAvatar
                 return false;
             }
 
-            ZZOpenClassicAvatarSyncMessage packet =
-                message as ZZOpenClassicAvatarSyncMessage;
+            ZZAvatarSyncMessage packet =
+                message as ZZAvatarSyncMessage;
             if (packet == null)
             {
                 return false;
@@ -3478,7 +3515,7 @@ namespace OpenClassic.XboxAvatar
                     transfer.Bytes.Length - offset);
                 byte[] payload = new byte[length];
                 Buffer.BlockCopy(transfer.Bytes, offset, payload, 0, length);
-                ZZOpenClassicAvatarSyncMessage.SendPacket(
+                ZZAvatarSyncMessage.SendPacket(
                     local,
                     transfer.Target,
                     ChunkPacket,
@@ -3648,7 +3685,7 @@ namespace OpenClassic.XboxAvatar
                     PeerReady.Remove(id);
                     continue;
                 }
-                ZZOpenClassicAvatarSyncMessage.SendHello(local, peer);
+                ZZAvatarSyncMessage.SendHello(local, peer);
                 PendingHello.Remove(id);
                 HelloSent[id] = peer;
             }
@@ -3699,7 +3736,7 @@ namespace OpenClassic.XboxAvatar
                 TransferId = transferId,
                 ExpiresUtc = DateTime.UtcNow + TransferTimeout
             };
-            ZZOpenClassicAvatarSyncMessage.SendPacket(
+            ZZAvatarSyncMessage.SendPacket(
                 local,
                 target,
                 ManifestPacket,
@@ -3711,7 +3748,7 @@ namespace OpenClassic.XboxAvatar
                 EmptyBytes);
         }
 
-        private static void HandleManifest(ZZOpenClassicAvatarSyncMessage packet)
+        private static void HandleManifest(ZZAvatarSyncMessage packet)
         {
             if (!ValidManifest(packet))
             {
@@ -3742,7 +3779,7 @@ namespace OpenClassic.XboxAvatar
                 Received = new BitArray(packet.ChunkCount),
                 ExpiresUtc = DateTime.UtcNow + TransferTimeout
             };
-            ZZOpenClassicAvatarSyncMessage.SendPacket(
+            ZZAvatarSyncMessage.SendPacket(
                 LocalGamer,
                 packet.Sender,
                 RequestPacket,
@@ -3754,7 +3791,7 @@ namespace OpenClassic.XboxAvatar
                 EmptyBytes);
         }
 
-        private static void HandleRequest(ZZOpenClassicAvatarSyncMessage packet)
+        private static void HandleRequest(ZZAvatarSyncMessage packet)
         {
             string key = TransferKey(packet.Sender.Id, packet.TransferId);
             OutgoingOffer offer;
@@ -3779,7 +3816,7 @@ namespace OpenClassic.XboxAvatar
             });
         }
 
-        private static void HandleChunk(ZZOpenClassicAvatarSyncMessage packet)
+        private static void HandleChunk(ZZAvatarSyncMessage packet)
         {
             string key = TransferKey(packet.Sender.Id, packet.TransferId);
             IncomingTransfer transfer;
@@ -3829,7 +3866,7 @@ namespace OpenClassic.XboxAvatar
             SetRemoteAsset(transfer.Sender, cached, transfer.Hash);
         }
 
-        private static bool ValidManifest(ZZOpenClassicAvatarSyncMessage packet)
+        private static bool ValidManifest(ZZAvatarSyncMessage packet)
         {
             if (packet.TotalLength <= 0 ||
                 packet.TotalLength > MaximumAssetBytes ||
@@ -4096,10 +4133,7 @@ namespace OpenClassic.XboxAvatar
         {
             get
             {
-                return Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "OpenClassic Addons",
-                    "Xbox Avatar");
+                return Branding.AvatarFolder(AppDomain.CurrentDomain.BaseDirectory);
             }
         }
 
@@ -4163,7 +4197,7 @@ namespace OpenClassic.XboxAvatar
         }
     }
 
-    public sealed class ZZOpenClassicAvatarSyncMessage : CastleMinerZMessage
+    public sealed class ZZAvatarSyncMessage : CastleMinerZMessage
     {
         internal byte Protocol;
         internal byte Kind;
@@ -4174,7 +4208,7 @@ namespace OpenClassic.XboxAvatar
         internal byte[] Hash;
         internal byte[] Payload;
 
-        private ZZOpenClassicAvatarSyncMessage()
+        private ZZAvatarSyncMessage()
         {
             Hash = new byte[32];
             Payload = new byte[0];
@@ -4202,12 +4236,12 @@ namespace OpenClassic.XboxAvatar
             int payloadLength = reader.ReadUInt16();
             if (payloadLength < 0 || payloadLength > 3000)
             {
-                throw new InvalidDataException("Invalid OpenClassic avatar chunk length.");
+                throw new InvalidDataException("Invalid avatar chunk length.");
             }
             Payload = reader.ReadBytes(payloadLength);
             if (Hash.Length != 32 || Payload.Length != payloadLength)
             {
-                throw new EndOfStreamException("Truncated OpenClassic avatar packet.");
+                throw new EndOfStreamException("Truncated avatar packet.");
             }
         }
 
@@ -4258,8 +4292,8 @@ namespace OpenClassic.XboxAvatar
             {
                 return;
             }
-            ZZOpenClassicAvatarSyncMessage packet =
-                GetSendInstance<ZZOpenClassicAvatarSyncMessage>();
+            ZZAvatarSyncMessage packet =
+                GetSendInstance<ZZAvatarSyncMessage>();
             packet.Protocol = 1;
             packet.Kind = kind;
             packet.TransferId = transferId;

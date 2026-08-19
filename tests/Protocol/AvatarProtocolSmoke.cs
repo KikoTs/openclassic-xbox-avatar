@@ -18,9 +18,7 @@ internal static class AvatarProtocolSmoke
         }
 
         Assembly mod = Assembly.LoadFrom(Path.GetFullPath(args[0]));
-        Type packetType = mod.GetType(
-            "OpenClassic.XboxAvatar.ZZOpenClassicAvatarSyncMessage",
-            true);
+        Type packetType = ModType(mod, "ZZAvatarSyncMessage");
         object packet = Activator.CreateInstance(packetType, true);
         MethodInfo receive = packetType.GetMethod("RecieveData", Hidden);
         MethodInfo send = packetType.GetMethod("SendData", Hidden);
@@ -65,7 +63,7 @@ internal static class AvatarProtocolSmoke
             serialized.Take(40).ToArray(),
             typeof(EndOfStreamException));
 
-        Type assetType = mod.GetType("OpenClassic.XboxAvatar.AvatarAsset", true);
+        Type assetType = ModType(mod, "AvatarAsset");
         object asset = assetType.GetMethod("Load", Hidden).Invoke(
             null,
             new object[] { Path.GetFullPath(args[1]) });
@@ -122,9 +120,7 @@ internal static class AvatarProtocolSmoke
         Require(new FileInfo(Path.GetFullPath(args[1])).Length <= 4 * 1024 * 1024,
             "avatar exceeds the network transfer limit");
 
-        Type bridge = mod.GetType(
-            "OpenClassic.XboxAvatar.AvatarNetworkBridge",
-            true);
+        Type bridge = ModType(mod, "AvatarNetworkBridge");
 
         byte[] stockDescription = Enumerable.Range(0, 10)
             .Select(index => (byte)(0x20 + index))
@@ -258,5 +254,25 @@ internal static class AvatarProtocolSmoke
         {
             throw new Exception(message);
         }
+    }
+
+    // Resolve a mod type by its simple name. The runtime ships under more than
+    // one brand, so its namespace is not fixed and must not be hard-coded here.
+    private static Type ModType(Assembly mod, string simpleName)
+    {
+        // Enumerating every type would need each dependency loadable in this
+        // reflection-only context, so probe the known brand namespaces instead.
+        string[] namespaces = { "XboxAvatar", "OpenClassic.XboxAvatar" };
+        foreach (string space in namespaces)
+        {
+            Type candidate = mod.GetType(space + "." + simpleName, false);
+            if (candidate != null)
+            {
+                return candidate;
+            }
+        }
+        // All probes returned null. Re-ask with throwOnError so the real reason
+        // (usually an unresolvable base type) surfaces instead of a bare null.
+        return mod.GetType(namespaces[0] + "." + simpleName, true);
     }
 }
