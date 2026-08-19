@@ -626,6 +626,32 @@ namespace OpenClassic.XboxAvatar
             return result;
         }
 
+        /// <summary>
+        /// A bone of the imported skeleton in the same space the item anchor
+        /// uses, so the two can be compared directly. Exposed for diagnostics:
+        /// the item lands exactly where it is aimed, so when it still looks
+        /// wrong the question is which bone the visible hand actually follows.
+        /// </summary>
+        internal bool TryGetAvatarSpaceBone(AvatarBone bone, out Vector3 position)
+        {
+            position = Vector3.Zero;
+            if (_avatar == null || _exportPoseBones == null ||
+                (int)bone >= _exportPoseBones.Length)
+            {
+                return false;
+            }
+            try
+            {
+                BuildExportSpacePose();
+                position = ExportBoneTranslation(bone);
+                return IsFinite(position);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         internal static Vector3 ComputeThirdPersonGripTranslation(
             Vector3 importedProp,
             Vector3 fingerIndex,
@@ -4079,6 +4105,12 @@ namespace OpenClassic.XboxAvatar
                     AvatarBone.PropRight);
                 float shape = imported.AvatarShapeScale;
 
+                // Where the game itself would put the item, before this hook
+                // touches anything. Unmodded that lands in the stock character's
+                // hand, so it is the reference the corrected position has to be
+                // judged against.
+                Vector3 stockAnchor = transform.Translation;
+
                 // Third person only. First person keeps the stock anchor: the
                 // viewmodel hand is drawn by a different path with its own
                 // scaling, so moving the anchor there lifted the held item off
@@ -4126,11 +4158,31 @@ namespace OpenClassic.XboxAvatar
                 Vector3 item =
                     Vector3.TransformNormal(childOffset, transform) +
                     transform.Translation;
+
+                // The item lands where it is aimed, so when it still looks
+                // wrong the aim point is the suspect. Print the candidate hand
+                // bones alongside it, all in the anchor's own space, so the one
+                // the visible hand actually follows can be identified by which
+                // number matches where the hand is on screen.
+                Vector3 wrist, prop;
+                bool haveWrist = imported.TryGetAvatarSpaceBone(
+                    AvatarBone.WristRight, out wrist);
+                bool haveProp = imported.TryGetAvatarSpaceBone(
+                    AvatarBone.PropRight, out prop);
+
                 Report(binding,
                     "build=" + shape.ToString("F3") +
-                    " grip=" + target +
                     " item=" + item +
-                    " miss=" + Vector3.Distance(item, target).ToString("F4") +
+                    " grip=" + target +
+                    (haveWrist
+                        ? " wrist=" + wrist +
+                          " gripToWrist=" + Vector3.Distance(target, wrist).ToString("F4")
+                        : " wrist=?") +
+                    (haveProp
+                        ? " prop=" + prop +
+                          " gripToProp=" + Vector3.Distance(target, prop).ToString("F4")
+                        : " prop=?") +
+                    " stockAnchor=" + stockAnchor +
                     " childOffset=" + childOffset +
                     " child0=" + (itemAnchor.Children != null && itemAnchor.Children.Count > 0
                         ? itemAnchor.Children[0].GetType().Name
