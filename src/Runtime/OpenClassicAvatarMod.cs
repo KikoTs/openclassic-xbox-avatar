@@ -4077,18 +4077,7 @@ namespace OpenClassic.XboxAvatar
                     AvatarBone.PropRight);
                 Matrix transform = binding.Avatar.GetBoneToAvatar(
                     AvatarBone.PropRight);
-                Vector3 stockGrip = transform.Translation;
-
-                // GetBoneToAvatar always returns the stock 1.6 m rig, whose
-                // basis is unit-scaled, because the game falls back to its
-                // default bind pose on this platform. Replacing only the
-                // translation therefore moved the grip with the body but left
-                // the held item's own in-hand offset at default size, so an item
-                // that sits 11-15 cm up the hand (axe, custom guns) hung short
-                // of a larger avatar's grip. Scale the basis so that offset
-                // grows with the body it is attached to.
                 float shape = imported.AvatarShapeScale;
-                transform = Matrix.CreateScale(shape) * transform;
 
                 // Third person only. First person keeps the stock anchor: the
                 // viewmodel hand is drawn by a different path with its own
@@ -4104,27 +4093,47 @@ namespace OpenClassic.XboxAvatar
                     continue;
                 }
 
-                // Editable per-height nudge, for tuning the fit without a
-                // rebuild. Zero unless the tuning file says otherwise.
-                transform.Translation = target + ItemTuning.OffsetFor(shape);
+                // The held item is a child of this anchor and carries its own
+                // offset from it: a gun sits at the origin, a tool about 0.111
+                // along the anchor's up axis. Stock Castle Miner Z depends on
+                // that, because its anchor is the prop bone well below the palm
+                // and the offset is exactly what lifts the tool into the hand.
+                // Moving the anchor onto the visible grip therefore displaced
+                // such an item a second time, by a distance that grew with the
+                // avatar, which is why it looked worse the taller the player.
+                //
+                // Aim the anchor so that the item lands on the grip instead of
+                // the anchor doing so. A gun is unaffected, its offset is zero.
+                Vector3 childOffset = Vector3.Zero;
+                if (itemAnchor.Children != null && itemAnchor.Children.Count > 0)
+                {
+                    childOffset = itemAnchor.Children[0].LocalToParent.Translation;
+                }
+
+                transform.Translation =
+                    target
+                    - Vector3.TransformNormal(childOffset, transform)
+                    // Editable per-height nudge, for trimming the fit without a
+                    // rebuild. Zero unless the tuning file says otherwise.
+                    + ItemTuning.OffsetFor(shape);
 
                 itemAnchor.LocalToParent = transform;
 
-                // The grip itself is verified correct offline against every
-                // build height, so an item still hanging below the hand means
-                // the write is not reaching the item or is being overwritten
-                // afterwards. Record what went in and what the anchor and its
-                // child actually hold, so the two can be compared.
+                // "item" is where the held object actually ends up once its own
+                // offset is applied, and "grip" is where the fingers are. Those
+                // two matching is the thing that matters; the anchor sitting
+                // somewhere else is expected whenever the item is offset.
+                Vector3 item =
+                    Vector3.TransformNormal(childOffset, transform) +
+                    transform.Translation;
                 Report(binding,
                     "build=" + shape.ToString("F3") +
-                    " wrote=" + transform.Translation +
-                    " anchorNow=" + itemAnchor.LocalToParent.Translation +
-                    " children=" + (itemAnchor.Children == null
-                        ? "null"
-                        : itemAnchor.Children.Count.ToString()) +
+                    " grip=" + target +
+                    " item=" + item +
+                    " miss=" + Vector3.Distance(item, target).ToString("F4") +
+                    " childOffset=" + childOffset +
                     " child0=" + (itemAnchor.Children != null && itemAnchor.Children.Count > 0
-                        ? itemAnchor.Children[0].GetType().Name + "@" +
-                          itemAnchor.Children[0].LocalToParent.Translation
+                        ? itemAnchor.Children[0].GetType().Name
                         : "none"));
             }
         }
