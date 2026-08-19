@@ -55,22 +55,58 @@ namespace OpenClassic.XboxAvatar
     {
         private const string FileName = "item-tuning.txt";
 
+        /// <summary>
+        /// Which point the held item is anchored to.
+        ///
+        /// The item anchor and the imported mesh end up in the same avatar
+        /// space but are driven from two different skeletons: the anchor from
+        /// the stock 1.6 m rig's bind pose, the mesh from the imported
+        /// avatar's own. Which correction closes that gap is a question about
+        /// the rendered result, so it is switchable at runtime and can be
+        /// answered by looking instead of by argument.
+        /// </summary>
+        internal enum Placement
+        {
+            /// <summary>The imported avatar's finger-centre grip.</summary>
+            Grip,
+            /// <summary>The imported avatar's own PropRight attach bone.</summary>
+            Prop,
+            /// <summary>Stock anchor nudged by the imported hand's prop-to-grip offset.</summary>
+            Shift,
+            /// <summary>Whatever the unmodded game does, as a baseline.</summary>
+            Stock,
+        }
+
         private static readonly List<KeyValuePair<float, Vector3>> Rows =
             new List<KeyValuePair<float, Vector3>>();
+        private static Placement _mode = Placement.Grip;
+        private static Vector3 _global;
         private static DateTime _stampUtc;
         private static DateTime _nextCheckUtc = DateTime.MinValue;
         private static bool _loaded;
+
+        internal static Placement Mode
+        {
+            get
+            {
+                Refresh();
+                return _mode;
+            }
+        }
 
         /// <summary>What the tuning file currently holds, for the status log.</summary>
         internal static string Describe()
         {
             Refresh();
+            var text = new System.Text.StringBuilder();
+            text.Append("mode=").Append(_mode.ToString().ToLowerInvariant());
+            text.Append(" offset=").Append(_global);
             if (Rows.Count == 0)
             {
-                return "not loaded (no rows parsed)";
+                text.Append(" (no per-build rows)");
+                return text.ToString();
             }
-            var text = new System.Text.StringBuilder();
-            text.Append(Rows.Count).Append(" rows:");
+            text.Append(" ").Append(Rows.Count).Append(" rows:");
             foreach (KeyValuePair<float, Vector3> row in Rows)
             {
                 text.Append(" ").Append(row.Key.ToString("F2"))
@@ -79,9 +115,23 @@ namespace OpenClassic.XboxAvatar
             return text.ToString();
         }
 
+        /// <summary>
+        /// The nudge in force for this build: the unconditional "offset" line
+        /// plus whatever the per-build rows interpolate to.
+        ///
+        /// The two are kept separate because a row only ever applies to the
+        /// build it is keyed to. A row written at a build no avatar has moves
+        /// nothing, which is indistinguishable from the file being ignored, so
+        /// there has to be a way to move every avatar at once.
+        /// </summary>
         internal static Vector3 OffsetFor(float build)
         {
             Refresh();
+            return _global + RowOffsetFor(build);
+        }
+
+        private static Vector3 RowOffsetFor(float build)
+        {
             if (Rows.Count == 0)
             {
                 return Vector3.Zero;
@@ -152,6 +202,8 @@ namespace OpenClassic.XboxAvatar
         private static void Parse(string[] lines)
         {
             Rows.Clear();
+            _mode = Placement.Grip;
+            _global = Vector3.Zero;
             foreach (string raw in lines)
             {
                 string line = raw.Trim();
@@ -170,6 +222,29 @@ namespace OpenClassic.XboxAvatar
                     StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length < 2)
                 {
+                    continue;
+                }
+
+                if (string.Equals(parts[0], "mode",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        _mode = (Placement)Enum.Parse(
+                            typeof(Placement), parts[1], true);
+                    }
+                    catch
+                    {
+                        // An unrecognised name keeps the current mode rather
+                        // than silently reverting placement mid-session.
+                    }
+                    continue;
+                }
+
+                if (string.Equals(parts[0], "offset",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    _global = ParseVector(parts);
                     continue;
                 }
 
@@ -198,6 +273,26 @@ namespace OpenClassic.XboxAvatar
             });
         }
 
+        /// <summary>
+        /// "offset 0.05" means Y only, "offset 0 0.05 0" means all three.
+        /// </summary>
+        private static Vector3 ParseVector(string[] parts)
+        {
+            float x, y, z;
+            if (parts.Length >= 4 &&
+                TryParse(parts[1], out x) &&
+                TryParse(parts[2], out y) &&
+                TryParse(parts[3], out z))
+            {
+                return new Vector3(x, y, z);
+            }
+            if (TryParse(parts[1], out y))
+            {
+                return new Vector3(0f, y, 0f);
+            }
+            return Vector3.Zero;
+        }
+
         private static bool TryParse(string text, out float value)
         {
             return float.TryParse(
@@ -214,21 +309,42 @@ namespace OpenClassic.XboxAvatar
             {
                 "# Third-person held-item tuning.",
                 "#",
-                "# The grip already tracks avatar build automatically, so every",
-                "# offset here is 0 and the item should sit correctly without",
-                "# changing anything. Use this to nudge the last centimetre.",
+                "# Only affects other players as YOU see them, and only in",
+                "# third person. Saved changes apply within a second, no",
+                "# restart. Everything in force is echoed to anchor-status.log",
+                "# next to this file, so you can confirm a change was read.",
+                "",
+                "# 1. Which point the item is anchored to.",
                 "#",
-                "# One row per build height:",
-                "#     build  offsetY",
-                "# or, if you need sideways and depth too:",
-                "#     build  offsetX  offsetY  offsetZ",
+                "#      mode grip    the avatar's own fingers          (default)",
+                "#      mode prop    the avatar's own attach bone",
+                "#      mode shift   stock anchor, nudged by the hand offset",
+                "#      mode stock   untouched game placement, as a baseline",
                 "#",
+                "# If the item is in the wrong place, try these four before",
+                "# reaching for numbers below: they move it much further than",
+                "# any nudge, and which one looks right says where the bug is.",
+                "",
+                "mode grip",
+                "",
+                "# 2. A nudge applied to every avatar, whatever its height.",
                 "# +Y raises the item, -Y lowers it. Metres, so 0.01 is 1 cm.",
-                "# A build between two rows is interpolated, so the item does",
-                "# not jump between heights. Your current avatar's build is",
-                "# printed in anchor-status.log next to this folder.",
+                "# Use a big value like 1.0 first if you just want to prove the",
+                "# file is being read - the item should fly a metre upwards.",
                 "#",
-                "# Saved changes are picked up within a second, no restart.",
+                "#     offset  Y            or      offset  X  Y  Z",
+                "",
+                "offset 0.0",
+                "",
+                "# 3. Per-height nudges, on top of the one above. One row per",
+                "# build, interpolated in between so the item does not jump.",
+                "#",
+                "#     build  offsetY       or      build  offsetX  offsetY  offsetZ",
+                "#",
+                "# Careful: a row only applies to the build it is keyed to, and",
+                "# real avatars sit between about 0.80 and 1.20. A row at 10.0",
+                "# will never do anything. Each player's build is printed in",
+                "# anchor-status.log.",
                 "",
                 "0.80   0.000",
                 "1.00   0.000",
@@ -4167,31 +4283,55 @@ namespace OpenClassic.XboxAvatar
                     continue;
                 }
 
-                // Adjust the game's own placement rather than replacing it.
+                // Why the stock anchor is wrong at all, and by how much:
                 //
-                // Castle Miner Z already puts the item correctly in a hand: it
-                // anchors to the prop bone and every item's own offset from that
-                // anchor is authored against it. All the imported avatar changes
-                // is that its prop bone sits further below the palm than the
-                // stock rig's does. So shift by exactly that difference and
-                // leave everything else the game does intact.
+                // Avatar.UpdateParts rebuilds the item anchor every frame from
+                // the animated skeleton but forces each bone's translation
+                // back to Avatar.BindPose - the stock 1.6 m rig. The visible
+                // arms come from the imported avatar's own bind pose instead,
+                // via ProxyModelEntity. So the anchor tracks a body the player
+                // is not wearing, and the taller the avatar the further the
+                // hand has moved away from it. That is the floating weapon.
                 //
-                // Writing the absolute grip position instead threw away the
-                // game's placement altogether and moved items about 23 cm up,
-                // which is why they ended up out of the hand entirely.
+                // Both live in the same avatar space - the imported mesh is
+                // drawn through RenderWorld, which is that space with Z
+                // negated, and TryGetAvatarSpaceBone undoes exactly that - so
+                // the imported bones can be written straight into the anchor.
                 Vector3 propToGrip = Vector3.Zero;
                 Vector3 importedProp;
-                if (imported.TryGetAvatarSpaceBone(
-                        AvatarBone.PropRight, out importedProp))
+                bool haveImportedProp = imported.TryGetAvatarSpaceBone(
+                    AvatarBone.PropRight, out importedProp);
+                if (haveImportedProp)
                 {
                     propToGrip = target - importedProp;
                 }
 
+                // Which of these closes the gap is a question about pixels, so
+                // it is left switchable rather than settled by argument. The
+                // absolute grip is the default because it is the only one that
+                // follows the imported body's height at all: the shift is the
+                // same few centimetres whether the avatar is short or tall.
+                Vector3 placed;
+                switch (ItemTuning.Mode)
+                {
+                    case ItemTuning.Placement.Stock:
+                        placed = stockAnchor;
+                        break;
+                    case ItemTuning.Placement.Shift:
+                        placed = stockAnchor + propToGrip;
+                        break;
+                    case ItemTuning.Placement.Prop:
+                        placed = haveImportedProp ? importedProp : target;
+                        break;
+                    default:
+                        placed = target;
+                        break;
+                }
+
                 transform.Translation =
-                    stockAnchor
-                    + propToGrip
-                    // Editable per-height nudge, for trimming the fit without a
-                    // rebuild. Zero unless the tuning file says otherwise.
+                    placed
+                    // Editable nudge, for trimming the fit without a rebuild.
+                    // Zero unless the tuning file says otherwise.
                     + ItemTuning.OffsetFor(shape);
 
                 Vector3 childOffset = Vector3.Zero;
@@ -4222,8 +4362,10 @@ namespace OpenClassic.XboxAvatar
                     AvatarBone.PropRight, out prop);
 
                 Report(binding,
-                    "build=" + shape.ToString("F3") +
+                    "mode=" + ItemTuning.Mode.ToString().ToLowerInvariant() +
+                    " build=" + shape.ToString("F3") +
                     " item=" + item +
+                    " grip=" + target +
                     " stockAnchor=" + stockAnchor +
                     " shift=" + propToGrip +
                     " shiftLen=" + propToGrip.Length().ToString("F4") +
