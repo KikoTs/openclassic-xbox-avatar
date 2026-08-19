@@ -239,6 +239,19 @@ static void RestoreLocalExecutable(string gameDirectory)
     RequireFile(inputPath, "CastleMinerZ.exe");
     RequireFile(manifestPath, "the Xbox Avatar backup manifest");
 
+    // A game or base-mod update replaces the patched executable but leaves the
+    // manifest behind. Restoring the recorded backup then silently downgrades
+    // the install, so refuse unless the hooks we are removing are actually here.
+    if (!HasAvatarHooks(inputPath))
+    {
+        throw new InvalidOperationException(
+            "The installed CastleMinerZ.exe does not contain the Xbox Avatar hooks, so there is " +
+            "nothing to remove. Castle Miner Z or a base mod was most likely updated since the " +
+            "add-on was installed. Restoring the recorded backup would overwrite your current " +
+            "build with an older one, so it was left alone. Delete " + manifestPath +
+            " to clear the stale record, then enable the add-on again.");
+    }
+
     string backupName = File.ReadAllText(manifestPath).Trim();
     if (Path.GetFileName(backupName) != backupName || string.IsNullOrWhiteSpace(backupName))
     {
@@ -265,6 +278,24 @@ static void RestoreLocalExecutable(string gameDirectory)
 
     Console.WriteLine("Restored base executable: " + backupPath);
     Console.WriteLine("Retained avatar-enabled recovery copy: " + retainedPatchedPath);
+}
+
+static bool HasAvatarHooks(string executablePath)
+{
+    using ModuleDefMD module = ModuleDefMD.Load(executablePath);
+    TypeDef? player = module.GetTypes()
+        .FirstOrDefault(type => type.FullName == "DNA.CastleMinerZ.Player");
+    if (player is null)
+    {
+        return false;
+    }
+
+    return player.Methods
+        .Where(method => method.IsInstanceConstructor && method.HasBody)
+        .Any(method => method.Body.Instructions.Any(instruction =>
+            instruction.OpCode.Code == Code.Call &&
+            instruction.Operand is IMethod called &&
+            called.DeclaringType?.FullName == "OpenClassic.XboxAvatar.AvatarEntityFactory"));
 }
 
 static void RequireFile(string path, string description)
