@@ -13,13 +13,47 @@ internal static class AvatarAttachmentSmoke
 
     private static int Main(string[] args)
     {
-        if (args.Length != 2)
+        if (args.Length < 2 || args.Length > 3)
         {
             Console.Error.WriteLine(
-                "Usage: AvatarAttachmentSmoke <mod.dll> <avatar.ocavatar>");
+                "Usage: AvatarAttachmentSmoke <mod.dll> <avatar.ocavatar> [game folder]");
             return 2;
         }
 
+        // This method must not touch a DNA type. Referencing one here would make
+        // the JIT resolve DNA.Common while compiling Main, before the handler
+        // below is attached, and the load would fail before it could help. The
+        // real work therefore lives in Run, which is kept out of line.
+        string gameFolder = args.Length == 3
+            ? Path.GetFullPath(args[2])
+            : Path.GetDirectoryName(Path.GetFullPath(args[1]));
+        AppDomain.CurrentDomain.AssemblyResolve += delegate(object sender, ResolveEventArgs resolveArgs)
+        {
+            string wanted = new AssemblyName(resolveArgs.Name).Name;
+            for (string folder = gameFolder;
+                 !string.IsNullOrEmpty(folder);
+                 folder = Path.GetDirectoryName(folder))
+            {
+                // .exe matters: the game assembly is CastleMinerZ.exe.
+                foreach (string extension in new[] { ".dll", ".exe" })
+                {
+                    string candidate = Path.Combine(folder, wanted + extension);
+                    if (File.Exists(candidate))
+                    {
+                        return Assembly.LoadFrom(candidate);
+                    }
+                }
+            }
+            return null;
+        };
+
+        return Run(args);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(
+        System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static int Run(string[] args)
+    {
         Assembly mod = Assembly.LoadFrom(Path.GetFullPath(args[0]));
         Type assetType = ModType(mod, "AvatarAsset");
         object asset = assetType.GetMethod("Load", Hidden).Invoke(
@@ -45,8 +79,8 @@ internal static class AvatarAttachmentSmoke
         Require(Vector3.Distance(sourceProp, sourceWrist) < 0.5f,
             "source PropRight is detached from the right wrist");
 
-        // Runtime export space reflects X/Z into Castle Miner Z space before
-        // the attachment correction is evaluated.
+        // Runtime export space reflects Z into Castle Miner Z space before the
+        // attachment correction is evaluated.
         Vector3 importedProp = ConvertExport(sourceProp);
         Vector3 importedIndex = ConvertExport(
             source[(int)AvatarBone.FingerIndexRight].Translation);
@@ -59,9 +93,23 @@ internal static class AvatarAttachmentSmoke
         Vector3 importedThumb = ConvertExport(
             source[(int)AvatarBone.FingerThumbRight].Translation);
         Type entityType = ModType(mod, "ImportedAvatarModelEntity");
+
+        // Take the scale-aware overload explicitly: the correction bound is
+        // proportional to the avatar's build, so the harness has to say which
+        // build it is checking.
+        float shapeScale = RootScale(sourceLocal);
         MethodInfo compute = entityType.GetMethod(
             "ComputeThirdPersonGripTranslation",
-            Hidden);
+            Hidden,
+            null,
+            new[]
+            {
+                typeof(Vector3), typeof(Vector3), typeof(Vector3),
+                typeof(Vector3), typeof(Vector3), typeof(Vector3),
+                typeof(float)
+            },
+            null);
+        Require(compute != null, "scale-aware grip overload is missing");
         Vector3 corrected = (Vector3)compute.Invoke(
             null,
             new object[]
@@ -71,7 +119,8 @@ internal static class AvatarAttachmentSmoke
                 importedMiddle,
                 importedRing,
                 importedSmall,
-                importedThumb
+                importedThumb,
+                shapeScale
             });
         Require(IsFinite(corrected), "corrected PropRight is not finite");
         Vector3 expectedGrip =
@@ -81,6 +130,31 @@ internal static class AvatarAttachmentSmoke
             "item anchor did not move to the visible digit grip center");
         Require(corrected.Y - importedProp.Y > 0.08f,
             "item anchor remains below the visible hand");
+
+        // A tall avatar is the case that regressed: the prop-to-grip correction
+        // grows with the body, so a correction bound expressed in absolute
+        // metres starts truncating it around a build of 1.61 and drags the item
+        // back down towards the invisible prop bone. Re-run the same geometry
+        // scaled up and require the anchor still reaches the grip exactly.
+        const float tallBuild = 2.0f;
+        Vector3 tallProp = importedProp * tallBuild;
+        Vector3 tallIndex = importedIndex * tallBuild;
+        Vector3 tallMiddle = importedMiddle * tallBuild;
+        Vector3 tallRing = importedRing * tallBuild;
+        Vector3 tallSmall = importedSmall * tallBuild;
+        Vector3 tallThumb = importedThumb * tallBuild;
+        Vector3 tallCorrected = (Vector3)compute.Invoke(
+            null,
+            new object[]
+            {
+                tallProp, tallIndex, tallMiddle,
+                tallRing, tallSmall, tallThumb,
+                shapeScale * tallBuild
+            });
+        Vector3 tallGrip =
+            (tallIndex + tallMiddle + tallRing + tallSmall + tallThumb) / 5f;
+        Require(Vector3.Distance(tallCorrected, tallGrip) < 0.0001f,
+            "tall avatar item anchor was clamped short of the visible grip");
 
         // Pistols have an identity ItemUse.Hand child matrix, so this checks
         // the final rendered pistol origin after the complete child-to-anchor
@@ -103,9 +177,27 @@ internal static class AvatarAttachmentSmoke
         return 0;
     }
 
+    /// <summary>The editor build scale, which lives in the root of the source pose.</summary>
+    private static float RootScale(Matrix[] sourceLocal)
+    {
+        Vector3 scale;
+        Quaternion rotation;
+        Vector3 translation;
+        if (!sourceLocal[0].Decompose(out scale, out rotation, out translation))
+        {
+            return 1f;
+        }
+        return (scale.X + scale.Y + scale.Z) / 3f;
+    }
+
     private static Vector3 ConvertExport(Vector3 source)
     {
-        return new Vector3(-source.X, source.Y, -source.Z);
+        // Z only, matching the runtime's ExportBoneTranslation. The runtime
+        // dropped the X flip when its render transform became a pure Z
+        // reflection; this harness kept flipping X, so it was not exercising the
+        // space the runtime actually uses and could not catch sign or space
+        // regressions.
+        return new Vector3(source.X, source.Y, -source.Z);
     }
 
     private static Matrix[] BuildCumulative(Matrix[] local)

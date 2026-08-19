@@ -11,11 +11,38 @@ internal static class AvatarProtocolSmoke
 
     private static int Main(string[] args)
     {
-        if (args.Length != 2)
+        if (args.Length < 2 || args.Length > 3)
         {
-            Console.Error.WriteLine("Usage: AvatarProtocolSmoke <mod.dll> <avatar.ocavatar>");
+            Console.Error.WriteLine(
+                "Usage: AvatarProtocolSmoke <mod.dll> <avatar.ocavatar> [game folder]");
             return 2;
         }
+
+        // The mod references the game assembly, so resolving its types needs the
+        // client on hand. Default to the folder the avatar was loaded from,
+        // which is inside the game folder in a real install.
+        string gameFolder = args.Length == 3
+            ? Path.GetFullPath(args[2])
+            : Path.GetDirectoryName(Path.GetFullPath(args[1]));
+        AppDomain.CurrentDomain.AssemblyResolve += delegate(object sender, ResolveEventArgs resolveArgs)
+        {
+            string wanted = new AssemblyName(resolveArgs.Name).Name;
+            for (string folder = gameFolder;
+                 !string.IsNullOrEmpty(folder);
+                 folder = Path.GetDirectoryName(folder))
+            {
+                // .exe matters: the game assembly is CastleMinerZ.exe.
+                foreach (string extension in new[] { ".dll", ".exe" })
+                {
+                    string candidate = Path.Combine(folder, wanted + extension);
+                    if (File.Exists(candidate))
+                    {
+                        return Assembly.LoadFrom(candidate);
+                    }
+                }
+            }
+            return null;
+        };
 
         Assembly mod = Assembly.LoadFrom(Path.GetFullPath(args[0]));
         Type packetType = ModType(mod, "ZZAvatarSyncMessage");

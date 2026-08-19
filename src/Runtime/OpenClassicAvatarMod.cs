@@ -222,7 +222,17 @@ namespace OpenClassic.XboxAvatar
                     device.BlendState = BlendState.NonPremultiplied;
                     device.DepthStencilState = DepthStencilState.Default;
                     device.RasterizerState = RasterizerState.CullNone;
-                    device.SamplerStates[0] = SamplerState.LinearWrap;
+                    // Xbox authors these textures for clamp-to-transparent-edge.
+                    // Every face-layer mask ships a fully transparent one-texel
+                    // border, and a face layer covers the whole head half while
+                    // only a small feature is opaque, so vertices away from the
+                    // feature deliberately carry UVs outside [0,1] and are meant
+                    // to sample nothing. Wrapping folded those back into the art
+                    // and painted eyes, eyebrows and mouth around the sides of
+                    // the head. Wrapping also pulled the opposite edge of small
+                    // clothing atlases across seams whose first and last rows
+                    // differ sharply, which banded the hairline.
+                    device.SamplerStates[0] = SamplerState.LinearClamp;
 
                     bool firstPerson = _avatar.HideHead;
 
@@ -348,6 +358,31 @@ namespace OpenClassic.XboxAvatar
             }
         }
 
+        /// <summary>
+        /// The editor's cumulative build scale at the right prop bone: 1.0 for a
+        /// default avatar, larger for a taller one.
+        ///
+        /// The game has no height knowledge at all — Avatar.AvatarHeight is a
+        /// hard-coded 1.6 and its bind pose is the stock rig — so anything that
+        /// has to follow the imported body's proportions must take them from
+        /// here. Already computed at load time for the first-person hands.
+        /// </summary>
+        internal float AvatarShapeScale
+        {
+            get
+            {
+                if (_asset == null ||
+                    _asset.FirstPersonBoneScale == null ||
+                    _asset.FirstPersonBoneScale.Length <= (int)AvatarBone.PropRight)
+                {
+                    return 1f;
+                }
+                Vector3 scale = _asset.FirstPersonBoneScale[(int)AvatarBone.PropRight];
+                float average = (scale.X + scale.Y + scale.Z) / 3f;
+                return average > 0.01f && !float.IsNaN(average) ? average : 1f;
+            }
+        }
+
         internal bool TryGetThirdPersonPropTranslation(out Vector3 translation)
         {
             translation = Vector3.Zero;
@@ -383,7 +418,8 @@ namespace OpenClassic.XboxAvatar
                     middle,
                     ring,
                     small,
-                    thumb);
+                    thumb,
+                    AvatarShapeScale);
                 return IsFinite(translation);
             }
             catch (Exception exception)
@@ -408,6 +444,25 @@ namespace OpenClassic.XboxAvatar
             Vector3 fingerSmall,
             Vector3 fingerThumb)
         {
+            return ComputeThirdPersonGripTranslation(
+                importedProp,
+                fingerIndex,
+                fingerMiddle,
+                fingerRing,
+                fingerSmall,
+                fingerThumb,
+                1f);
+        }
+
+        internal static Vector3 ComputeThirdPersonGripTranslation(
+            Vector3 importedProp,
+            Vector3 fingerIndex,
+            Vector3 fingerMiddle,
+            Vector3 fingerRing,
+            Vector3 fingerSmall,
+            Vector3 fingerThumb,
+            float shapeScale)
+        {
             if (!IsFinite(importedProp) || !IsFinite(fingerIndex) ||
                 !IsFinite(fingerMiddle) || !IsFinite(fingerRing) ||
                 !IsFinite(fingerSmall) || !IsFinite(fingerThumb))
@@ -423,7 +478,12 @@ namespace OpenClassic.XboxAvatar
             // Bound malformed/custom skeletons without restricting the real
             // Xbox avatar range: PropRight commonly sits about 15 cm below the
             // visible grip on tall models.
-            const float maximumCorrection = 0.22f;
+            //
+            // The correction is proportional to the body, so the bound has to be
+            // too. As a fixed 0.22 m it started truncating real avatars from a
+            // build of about 1.61 upwards, which pulled the item back towards
+            // the prop bone exactly on the tall avatars this is meant to serve.
+            float maximumCorrection = 0.22f * shapeScale;
             float lengthSquared = correction.LengthSquared();
             if (lengthSquared > maximumCorrection * maximumCorrection)
             {
@@ -548,7 +608,11 @@ namespace OpenClassic.XboxAvatar
                 device.BlendState = BlendState.NonPremultiplied;
                 device.DepthStencilState = DepthStencilState.Default;
                 device.RasterizerState = RasterizerState.CullNone;
-                device.SamplerStates[0] = SamplerState.LinearWrap;
+                // Same clamp-to-transparent-edge authoring as the third-person
+                // path. The first-person carrier copies its UVs from the glove
+                // batch by barycentric interpolation, so it inherits that
+                // batch's out-of-[0,1] island and must address it the same way.
+                device.SamplerStates[0] = SamplerState.LinearClamp;
 
                 // DrawVertices are already in the same world space as the
                 // stock item because WorldBoneTransforms includes LocalToWorld.
@@ -3348,10 +3412,26 @@ namespace OpenClassic.XboxAvatar
             new Dictionary<byte, NetworkGamer>();
         private static readonly Dictionary<byte, NetworkGamer> PeerReady =
             new Dictionary<byte, NetworkGamer>();
+
+        // Hellos that arrived before their sender's capability marker did.
+        // Capability adverts are broadcast and relayed by the host, while hellos
+        // go directly to one peer, so the two travel on different sequence
+        // channels and are not ordered against each other. Dropping an unproven
+        // hello loses it for good, because a peer only ever says hello once per
+        // session. Hold it until the marker proves the sender instead.
+        private static readonly Dictionary<byte, NetworkGamer> DeferredHello =
+            new Dictionary<byte, NetworkGamer>();
+        private const int MaxDeferredHellos = 32;
+
         private static uint _nextTransferId = 1;
         private static DateTime _nextCleanupUtc = DateTime.MinValue;
         private static LocalSnapshot _localSnapshot;
         private static bool _capabilityAdvertisementPending = true;
+
+        // Whether this session has actually put our marker on the wire. A hello
+        // sent before that is unanswerable: the peer cannot yet tell we are a
+        // capable peer, so it refuses to serve us and we never ask again.
+        private static bool _capabilityAdvertised;
 
         public static void Register()
         {
@@ -3402,7 +3482,15 @@ namespace OpenClassic.XboxAvatar
             }
 
             _capabilityAdvertisementPending = true;
-            if (!gamer.IsLocal)
+            if (gamer.IsLocal)
+            {
+                // A fresh session for this process. Statics survive from the
+                // previous one, so re-prove ourselves before asking anybody for
+                // an avatar, or the second session repeats the first-join bug.
+                _capabilityAdvertised = false;
+                DeferredHello.Clear();
+            }
+            else
             {
                 // Gamer IDs can be reused after a disconnect. Do not let a new
                 // player inherit the previous occupant's cached model binding
@@ -3417,6 +3505,7 @@ namespace OpenClassic.XboxAvatar
                 PendingHello.Remove(gamer.Id);
                 HelloSent.Remove(gamer.Id);
                 PeerReady.Remove(gamer.Id);
+                DeferredHello.Remove(gamer.Id);
             }
         }
 
@@ -3466,6 +3555,16 @@ namespace OpenClassic.XboxAvatar
             {
                 // A custom packet without the stock-safe capability marker is
                 // stale, spoofed, or from an incompatible protocol revision.
+                // A hello is the exception worth holding: only an add-on peer
+                // can have sent one, and its marker may simply still be in
+                // flight on the other sequence channel. Dropping it strands the
+                // sender with a stock model for the rest of the session, since
+                // it will never ask twice. Park it for the marker to clear.
+                if (packet.Kind == HelloPacket &&
+                    DeferredHello.Count < MaxDeferredHellos)
+                {
+                    DeferredHello[packet.Sender.Id] = packet.Sender;
+                }
                 return true;
             }
 
@@ -3496,7 +3595,18 @@ namespace OpenClassic.XboxAvatar
             }
 
             FlushCapabilityAdvertisement(local);
-            FlushPendingHello(local);
+
+            // Only ask for avatars once our own marker is on the wire. Until
+            // then a peer cannot recognise us as capable and would refuse, and
+            // we never ask a second time. The advert waits on the local player
+            // existing, which on a joining client is well after the peers'
+            // adverts have already arrived.
+            if (_capabilityAdvertised)
+            {
+                FlushPendingHello(local);
+            }
+
+            ServeDeferredHellos();
 
             int sent = 0;
             while (sent < ChunksPerUpdate && Outgoing.Count > 0)
@@ -3656,6 +3766,43 @@ namespace OpenClassic.XboxAvatar
 
             SendCapabilityAdvertisement(local, description.Description);
             _capabilityAdvertisementPending = false;
+            _capabilityAdvertised = true;
+        }
+
+        /// <summary>
+        /// Answers hellos that arrived before their sender was proven capable.
+        ///
+        /// Serviced here rather than the moment the marker lands, because
+        /// answering reads and hashes the local avatar from disk and the marker
+        /// arrives on the stock message path during a join.
+        /// </summary>
+        private static void ServeDeferredHellos()
+        {
+            if (DeferredHello.Count == 0)
+            {
+                return;
+            }
+
+            var ids = new List<byte>(DeferredHello.Keys);
+            foreach (byte id in ids)
+            {
+                NetworkGamer peer = DeferredHello[id];
+                if (peer == null || peer.HasLeftSession)
+                {
+                    DeferredHello.Remove(id);
+                    continue;
+                }
+
+                // Identity, not id: a reused gamer id must not inherit the
+                // previous occupant's pending hello.
+                if (!IsPeerCapable(peer))
+                {
+                    continue;
+                }
+
+                DeferredHello.Remove(id);
+                HandleHello(peer);
+            }
         }
 
         internal static void SendCapabilityAdvertisement(
@@ -3701,9 +3848,7 @@ namespace OpenClassic.XboxAvatar
                 }
                 var imported = binding.Avatar.ProxyModelEntity as
                     ImportedAvatarModelEntity;
-                Vector3 target;
-                if (imported == null ||
-                    !imported.TryGetThirdPersonPropTranslation(out target))
+                if (imported == null)
                 {
                     continue;
                 }
@@ -3712,7 +3857,36 @@ namespace OpenClassic.XboxAvatar
                     AvatarBone.PropRight);
                 Matrix transform = binding.Avatar.GetBoneToAvatar(
                     AvatarBone.PropRight);
-                transform.Translation = target;
+                Vector3 stockGrip = transform.Translation;
+
+                // GetBoneToAvatar always returns the stock 1.6 m rig, whose
+                // basis is unit-scaled, because the game falls back to its
+                // default bind pose on this platform. Replacing only the
+                // translation therefore moved the grip with the body but left
+                // the held item's own in-hand offset at default size, so an item
+                // that sits 11-15 cm up the hand (axe, custom guns) hung short
+                // of a larger avatar's grip. Scale the basis so that offset
+                // grows with the body it is attached to.
+                float shape = imported.AvatarShapeScale;
+                transform = Matrix.CreateScale(shape) * transform;
+
+                Vector3 target;
+                if (imported.TryGetThirdPersonPropTranslation(out target))
+                {
+                    transform.Translation = target;
+                }
+                else
+                {
+                    // First person: the visible grip cannot be measured because
+                    // the head and body are hidden, but the hand mesh is still
+                    // inflated by the build scale. Leaving the anchor on the
+                    // stock rig is what makes the weapon appear to hang away
+                    // from a taller avatar's hand. Move it by the same scale the
+                    // mesh got, which is the relationship measured in third
+                    // person, where target == stock grip * build scale.
+                    transform.Translation = stockGrip * shape;
+                }
+
                 itemAnchor.LocalToParent = transform;
             }
         }
