@@ -222,17 +222,10 @@ namespace OpenClassic.XboxAvatar
                     device.BlendState = BlendState.NonPremultiplied;
                     device.DepthStencilState = DepthStencilState.Default;
                     device.RasterizerState = RasterizerState.CullNone;
-                    // Xbox authors these textures for clamp-to-transparent-edge.
-                    // Every face-layer mask ships a fully transparent one-texel
-                    // border, and a face layer covers the whole head half while
-                    // only a small feature is opaque, so vertices away from the
-                    // feature deliberately carry UVs outside [0,1] and are meant
-                    // to sample nothing. Wrapping folded those back into the art
-                    // and painted eyes, eyebrows and mouth around the sides of
-                    // the head. Wrapping also pulled the opposite edge of small
-                    // clothing atlases across seams whose first and last rows
-                    // differ sharply, which banded the hairline.
-                    device.SamplerStates[0] = SamplerState.LinearClamp;
+                    // Default for this pass. Each batch overrides it below: only
+                    // face layers want clamping, and clothing needs wrapping
+                    // to index its palette and decal atlases correctly.
+                    device.SamplerStates[0] = SamplerState.LinearWrap;
 
                     bool firstPerson = _avatar.HideHead;
 
@@ -295,6 +288,21 @@ namespace OpenClassic.XboxAvatar
                         _effect.TextureEnabled = material.Texture != null;
                         _effect.Texture = material.Texture;
 #endif
+
+                        // Only face layers want clamping. Each covers the whole
+                        // head half while just one small feature is opaque, and
+                        // the mask ships a transparent border, so vertices away
+                        // from the feature carry UVs outside [0,1] and are meant
+                        // to sample nothing; wrapping folds that art back onto
+                        // the head and duplicates features on the far cheek.
+                        // Clothing is the opposite: its palette and decal
+                        // overlays index small atlases with deliberately
+                        // out-of-range coordinates and need wrapping to reach
+                        // the right entry, so clamping everything discoloured
+                        // the outfit.
+                        device.SamplerStates[0] = batch.FaceTextureUsage >= 0
+                            ? SamplerState.LinearClamp
+                            : SamplerState.LinearWrap;
 
                         foreach (EffectPass pass in _effect.CurrentTechnique.Passes)
                         {
@@ -608,11 +616,10 @@ namespace OpenClassic.XboxAvatar
                 device.BlendState = BlendState.NonPremultiplied;
                 device.DepthStencilState = DepthStencilState.Default;
                 device.RasterizerState = RasterizerState.CullNone;
-                // Same clamp-to-transparent-edge authoring as the third-person
-                // path. The first-person carrier copies its UVs from the glove
-                // batch by barycentric interpolation, so it inherits that
-                // batch's out-of-[0,1] island and must address it the same way.
-                device.SamplerStates[0] = SamplerState.LinearClamp;
+                // The first-person path draws hands and the carrier only, never a
+                // face layer, and the glove atlas relies on wrapping for its
+                // out-of-range island. Clamping here discoloured the hands.
+                device.SamplerStates[0] = SamplerState.LinearWrap;
 
                 // DrawVertices are already in the same world space as the
                 // stock item because WorldBoneTransforms includes LocalToWorld.

@@ -171,6 +171,23 @@ Invoke-Native 'AvatarAttachmentSmoke compilation' {
     & $frameworkCsc $attachmentTestArguments
 }
 
+# Offline renderer. Rasterises an .ocavatar to a PNG using the same loader and
+# skinning the game uses, so texture and attachment work can be seen and diffed
+# without launching the game.
+$renderProbeOut = Join-Path $bin 'AvatarRenderProbe.exe'
+$renderProbeSource = Join-Path $repoRoot 'tools\AvatarRenderProbe.cs'
+$renderProbeArguments = @(
+    '/nologo', '/target:exe', '/optimize+', '/platform:x86',
+    "/out:$renderProbeOut",
+    "/reference:$commonDll",
+    "/reference:$xnaFramework",
+    '/reference:System.Drawing.dll',
+    $renderProbeSource
+)
+Invoke-Native 'AvatarRenderProbe compilation' {
+    & $frameworkCsc $renderProbeArguments
+}
+
 $managerProject = Join-Path $repoRoot 'src\Manager\AvatarModPatcher.csproj'
 $managerPublish = Join-Path $obj 'manager-publish'
 Invoke-Native 'Manager publication' {
