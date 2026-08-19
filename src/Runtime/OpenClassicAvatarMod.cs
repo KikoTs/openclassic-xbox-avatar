@@ -2831,6 +2831,42 @@ namespace OpenClassic.XboxAvatar
             }
         }
 
+        /// <summary>
+        /// The body layer that carries the skin.
+        ///
+        /// A body can export several ":body:" layers - the solid skin plus
+        /// overlays painted on top of it. Every one of them satisfies the
+        /// base-body test, and taking whichever came last meant an outfit whose
+        /// body ends in "…:body:0:material-overlay-decal" handed the first
+        /// person its white decal material: the hands rendered white and the
+        /// glove, which draws as part of the same carrier, disappeared with
+        /// them. Third person was unaffected because it uses each batch's own
+        /// material and only borrows this one for bare-hand shells.
+        ///
+        /// Prefer the first layer that is not an overlay, and fall back to the
+        /// first of any kind so a body made only of overlays still resolves.
+        /// </summary>
+        private static AvatarBatch ChooseBaseBodyBatch(AvatarBatch[] batches)
+        {
+            AvatarBatch fallback = null;
+            foreach (AvatarBatch batch in batches)
+            {
+                if (batch == null || !batch.IsBaseBody)
+                {
+                    continue;
+                }
+                if (fallback == null)
+                {
+                    fallback = batch;
+                }
+                if (!batch.IsOverlayLayer)
+                {
+                    return batch;
+                }
+            }
+            return fallback;
+        }
+
         internal static AvatarAsset Load(string path)
         {
             using (var stream = File.OpenRead(path))
@@ -2916,14 +2952,11 @@ namespace OpenClassic.XboxAvatar
                     {
                         FlipBatchV(asset.Batches[index]);
                     }
-                    if (asset.Batches[index].IsBaseBody)
-                    {
-                        asset.BaseBodyBatch = asset.Batches[index];
-                    }
                     asset.Batches[index].BuildFirstPersonGeometry(
                         asset.BindPoseAbsolute[(int)AvatarBone.WristLeft].Translation,
                         asset.BindPoseAbsolute[(int)AvatarBone.WristRight].Translation);
                 }
+                asset.BaseBodyBatch = ChooseBaseBodyBatch(asset.Batches);
                 foreach (AvatarBatch batch in asset.Batches)
                 {
                     if (batch.IsHandComponent && batch.HasFingerGeometry)
@@ -3164,6 +3197,7 @@ namespace OpenClassic.XboxAvatar
         internal byte PaletteMask;
         internal Vector4[] Palette;
         internal bool IsBaseBody;
+        internal bool IsOverlayLayer;
         internal bool IsHandComponent;
         internal bool IsBareHandShell;
         internal bool HasFingerGeometry;
@@ -3193,6 +3227,14 @@ namespace OpenClassic.XboxAvatar
             batch.IsBaseBody =
                 batch.Name.StartsWith("00000002-", StringComparison.OrdinalIgnoreCase) &&
                 batch.Name.IndexOf(":body:", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            // A layer painted onto the body rather than the body itself, such
+            // as "…:body:0:material-overlay-decal". It carries a white material
+            // and addresses a thin decal strip of its atlas, so it is never the
+            // skin and must not be mistaken for it.
+            batch.IsOverlayLayer =
+                batch.Name.IndexOf("overlay", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                batch.Name.IndexOf("decal", StringComparison.OrdinalIgnoreCase) >= 0;
             batch.IsHandComponent = version >= 3
                 ? (batch.CategoryMask & 0x00000080u) != 0
                 : batch.Name.StartsWith(

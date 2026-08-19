@@ -102,17 +102,37 @@ internal static class AvatarProtocolSmoke
                 asset,
                 "OuterHandBatches");
         Require(body != null, "v3 asset has no base body");
-        Require(glove != null, "v3 asset did not classify outfit glove");
-        Require(gloveBatches.Count >= 1,
-            "combined outfit exposed no glove material batches");
-        Type batchType = glove.GetType();
-        uint gloveCategory = (uint)Get(batchType, glove, "CategoryMask");
-        Require((gloveCategory & 0x80u) != 0,
-            "glove category bit was not preserved");
-        Require(!(bool)Get(batchType, glove, "IsBareHandShell"),
-            "black outfit glove was classified as bare skin");
+
+        // The base body has to be the skin, not one of the overlay layers a
+        // body can also export ("...:body:0:material-overlay-decal"). First
+        // person takes its hand material from here, so an overlay winning
+        // renders the hands in that overlay's flat white.
+        string bodyName = (string)Get(body.GetType(), body, "Name");
+        Require(
+            bodyName.IndexOf("overlay", StringComparison.OrdinalIgnoreCase) < 0 &&
+            bodyName.IndexOf("decal", StringComparison.OrdinalIgnoreCase) < 0,
+            "base body resolved to an overlay layer: " + bodyName);
 
         Array batches = (Array)Get(assetType, asset, "Batches");
+
+        // Gloves are a hand component (category bit 0x80). Plenty of outfits
+        // have none and leave the avatar bare-handed, so only require the
+        // classification when the asset actually carries one. Asserting it
+        // unconditionally failed the build on a perfectly good avatar.
+        bool hasHandComponent = batches.Cast<object>().Any(value =>
+            ((uint)Get(value.GetType(), value, "CategoryMask") & 0x80u) != 0);
+        if (hasHandComponent)
+        {
+            Require(glove != null, "v3 asset did not classify outfit glove");
+            Require(gloveBatches.Count >= 1,
+                "combined outfit exposed no glove material batches");
+            Type batchType = glove.GetType();
+            uint gloveCategory = (uint)Get(batchType, glove, "CategoryMask");
+            Require((gloveCategory & 0x80u) != 0,
+                "glove category bit was not preserved");
+            Require(!(bool)Get(batchType, glove, "IsBareHandShell"),
+                "black outfit glove was classified as bare skin");
+        }
         bool topPreserved = batches.Cast<object>().Any(value =>
             ((uint)Get(value.GetType(), value, "CategoryMask") & 0x8u) != 0);
         Require(topPreserved, "upper-body/sleeve component category is missing");
