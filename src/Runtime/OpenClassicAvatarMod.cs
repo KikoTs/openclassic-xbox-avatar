@@ -39,6 +39,188 @@ namespace XboxAvatar
 namespace OpenClassic.XboxAvatar
 #endif
 {
+    /// <summary>
+    /// Editable per-height nudge for the third-person held item.
+    ///
+    /// The grip is computed from the avatar's own finger bones and is already
+    /// proportional to build, so this is zero by default and exists for tuning
+    /// the last centimetre by eye without a rebuild. The file is re-read while
+    /// the game runs, so a value can be changed and seen on the next frame.
+    ///
+    /// Rows are "build offsetX offsetY offsetZ", and the offset for a build
+    /// between two rows is interpolated, so a handful of rows covers the whole
+    /// height range smoothly rather than in steps.
+    /// </summary>
+    internal static class ItemTuning
+    {
+        private const string FileName = "item-tuning.txt";
+
+        private static readonly List<KeyValuePair<float, Vector3>> Rows =
+            new List<KeyValuePair<float, Vector3>>();
+        private static DateTime _stampUtc;
+        private static DateTime _nextCheckUtc = DateTime.MinValue;
+        private static bool _loaded;
+
+        internal static Vector3 OffsetFor(float build)
+        {
+            Refresh();
+            if (Rows.Count == 0)
+            {
+                return Vector3.Zero;
+            }
+            if (build <= Rows[0].Key)
+            {
+                return Rows[0].Value;
+            }
+            if (build >= Rows[Rows.Count - 1].Key)
+            {
+                return Rows[Rows.Count - 1].Value;
+            }
+            for (int index = 1; index < Rows.Count; index++)
+            {
+                if (build > Rows[index].Key)
+                {
+                    continue;
+                }
+                KeyValuePair<float, Vector3> low = Rows[index - 1];
+                KeyValuePair<float, Vector3> high = Rows[index];
+                float span = high.Key - low.Key;
+                float t = span <= 1e-6f ? 0f : (build - low.Key) / span;
+                return Vector3.Lerp(low.Value, high.Value, t);
+            }
+            return Vector3.Zero;
+        }
+
+        private static void Refresh()
+        {
+            DateTime now = DateTime.UtcNow;
+            if (now < _nextCheckUtc)
+            {
+                return;
+            }
+            _nextCheckUtc = now.AddSeconds(1);
+
+            try
+            {
+                string path = Path.Combine(
+                    Branding.AvatarFolder(AppDomain.CurrentDomain.BaseDirectory),
+                    FileName);
+
+                if (!File.Exists(path))
+                {
+                    if (!_loaded)
+                    {
+                        WriteTemplate(path);
+                        _loaded = true;
+                    }
+                    return;
+                }
+
+                DateTime stamp = File.GetLastWriteTimeUtc(path);
+                if (_loaded && stamp == _stampUtc)
+                {
+                    return;
+                }
+                _stampUtc = stamp;
+                _loaded = true;
+                Parse(File.ReadAllLines(path));
+            }
+            catch
+            {
+                // Tuning is a convenience; never let it disturb rendering.
+            }
+        }
+
+        private static void Parse(string[] lines)
+        {
+            Rows.Clear();
+            foreach (string raw in lines)
+            {
+                string line = raw.Trim();
+                int comment = line.IndexOf('#');
+                if (comment >= 0)
+                {
+                    line = line.Substring(0, comment).Trim();
+                }
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+
+                string[] parts = line.Split(
+                    new[] { ' ', '\t', ',' },
+                    StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 2)
+                {
+                    continue;
+                }
+
+                float build, x = 0f, y = 0f, z = 0f;
+                if (!TryParse(parts[0], out build)) { continue; }
+                if (parts.Length >= 4)
+                {
+                    if (!TryParse(parts[1], out x)) { continue; }
+                    if (!TryParse(parts[2], out y)) { continue; }
+                    if (!TryParse(parts[3], out z)) { continue; }
+                }
+                else if (!TryParse(parts[1], out y))
+                {
+                    // Two columns means "build height", the common case.
+                    continue;
+                }
+
+                Rows.Add(new KeyValuePair<float, Vector3>(
+                    build, new Vector3(x, y, z)));
+            }
+            Rows.Sort(delegate(
+                KeyValuePair<float, Vector3> a,
+                KeyValuePair<float, Vector3> b)
+            {
+                return a.Key.CompareTo(b.Key);
+            });
+        }
+
+        private static bool TryParse(string text, out float value)
+        {
+            return float.TryParse(
+                text,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out value);
+        }
+
+        private static void WriteTemplate(string path)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            File.WriteAllLines(path, new[]
+            {
+                "# Third-person held-item tuning.",
+                "#",
+                "# The grip already tracks avatar build automatically, so every",
+                "# offset here is 0 and the item should sit correctly without",
+                "# changing anything. Use this to nudge the last centimetre.",
+                "#",
+                "# One row per build height:",
+                "#     build  offsetY",
+                "# or, if you need sideways and depth too:",
+                "#     build  offsetX  offsetY  offsetZ",
+                "#",
+                "# +Y raises the item, -Y lowers it. Metres, so 0.01 is 1 cm.",
+                "# A build between two rows is interpolated, so the item does",
+                "# not jump between heights. Your current avatar's build is",
+                "# printed in anchor-status.log next to this folder.",
+                "#",
+                "# Saved changes are picked up within a second, no restart.",
+                "",
+                "0.80   0.000",
+                "1.00   0.000",
+                "1.20   0.000",
+                "1.50   0.000",
+                "2.00   0.000",
+            });
+        }
+    }
+
     internal static class Branding
     {
 #if XBOX_AVATAR_BRAND
@@ -3903,22 +4085,19 @@ namespace OpenClassic.XboxAvatar
                 float shape = imported.AvatarShapeScale;
                 transform = Matrix.CreateScale(shape) * transform;
 
+                // Third person only. First person keeps the stock anchor: the
+                // viewmodel hand is drawn by a different path with its own
+                // scaling, so moving the anchor there lifted the held item off
+                // the hand instead of onto it.
                 Vector3 target;
-                if (imported.TryGetThirdPersonPropTranslation(out target))
+                if (!imported.TryGetThirdPersonPropTranslation(out target))
                 {
-                    transform.Translation = target;
+                    continue;
                 }
-                else
-                {
-                    // First person: the visible grip cannot be measured because
-                    // the head and body are hidden, but the hand mesh is still
-                    // inflated by the build scale. Leaving the anchor on the
-                    // stock rig is what makes the weapon appear to hang away
-                    // from a taller avatar's hand. Move it by the same scale the
-                    // mesh got, which is the relationship measured in third
-                    // person, where target == stock grip * build scale.
-                    transform.Translation = stockGrip * shape;
-                }
+
+                // Editable per-height nudge, for tuning the fit without a
+                // rebuild. Zero unless the tuning file says otherwise.
+                transform.Translation = target + ItemTuning.OffsetFor(shape);
 
                 itemAnchor.LocalToParent = transform;
 
