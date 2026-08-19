@@ -4065,6 +4065,11 @@ namespace OpenClassic.XboxAvatar
                     ImportedAvatarModelEntity;
                 if (imported == null)
                 {
+                    // Not an error: this player has no imported avatar yet, so
+                    // there is no custom grip to apply. Report it anyway, since
+                    // third person is only ever seen on a remote player and a
+                    // silent skip is indistinguishable from a broken hook.
+                    Report(binding, "no imported avatar (stock model)");
                     continue;
                 }
 
@@ -4092,6 +4097,10 @@ namespace OpenClassic.XboxAvatar
                 Vector3 target;
                 if (!imported.TryGetThirdPersonPropTranslation(out target))
                 {
+                    Report(binding, "no third-person grip" +
+                        (binding.Avatar.HideHead
+                            ? " (first person, expected)"
+                            : " (UNEXPECTED: head is visible)"));
                     continue;
                 }
 
@@ -4106,7 +4115,17 @@ namespace OpenClassic.XboxAvatar
                 // the write is not reaching the item or is being overwritten
                 // afterwards. Record what went in and what the anchor and its
                 // child actually hold, so the two can be compared.
-                LogAnchorState(binding, itemAnchor, transform, shape);
+                Report(binding,
+                    "build=" + shape.ToString("F3") +
+                    " wrote=" + transform.Translation +
+                    " anchorNow=" + itemAnchor.LocalToParent.Translation +
+                    " children=" + (itemAnchor.Children == null
+                        ? "null"
+                        : itemAnchor.Children.Count.ToString()) +
+                    " child0=" + (itemAnchor.Children != null && itemAnchor.Children.Count > 0
+                        ? itemAnchor.Children[0].GetType().Name + "@" +
+                          itemAnchor.Children[0].LocalToParent.Translation
+                        : "none"));
             }
         }
 
@@ -4114,31 +4133,22 @@ namespace OpenClassic.XboxAvatar
             new Dictionary<byte, string>();
         private static DateTime _nextAnchorReportUtc = DateTime.MinValue;
 
-        private static void LogAnchorState(
-            PlayerBinding binding,
-            Entity itemAnchor,
-            Matrix written,
-            float shape)
+        /// <summary>
+        /// One line per player, rewritten as the scene changes. Third person is
+        /// only ever visible on somebody else, so this has to describe remote
+        /// players as well as the local one, including the ones that are
+        /// deliberately skipped.
+        /// </summary>
+        private static void Report(PlayerBinding binding, string detail)
         {
             try
             {
-                Entity child = itemAnchor.Children != null &&
-                    itemAnchor.Children.Count > 0
-                        ? itemAnchor.Children[0]
-                        : null;
-
-                byte key = binding.Gamer == null ? (byte)255 : binding.Gamer.Id;
+                NetworkGamer gamer = binding.Gamer;
+                byte key = gamer == null ? (byte)255 : gamer.Id;
                 AnchorReport[key] =
-                    "build=" + shape.ToString("F3") +
-                    " wrote=" + written.Translation +
-                    " anchorNow=" + itemAnchor.LocalToParent.Translation +
-                    " children=" + (itemAnchor.Children == null
-                        ? "null"
-                        : itemAnchor.Children.Count.ToString()) +
-                    " child0=" + (child == null
-                        ? "none"
-                        : child.GetType().Name + "@" +
-                          child.LocalToParent.Translation);
+                    (gamer == null ? "?" : gamer.Gamertag) +
+                    (gamer != null && gamer.IsLocal ? " [local]" : " [remote]") +
+                    "  " + detail;
 
                 DateTime now = DateTime.UtcNow;
                 if (now < _nextAnchorReportUtc)
@@ -4151,6 +4161,7 @@ namespace OpenClassic.XboxAvatar
                     AppDomain.CurrentDomain.BaseDirectory);
                 Directory.CreateDirectory(folder);
                 var lines = new List<string>(AnchorReport.Values);
+                lines.Sort(StringComparer.OrdinalIgnoreCase);
                 File.WriteAllLines(
                     Path.Combine(folder, "anchor-status.log"),
                     lines.ToArray());
