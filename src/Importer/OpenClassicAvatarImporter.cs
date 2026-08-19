@@ -353,7 +353,9 @@ internal static class AvatarImporter
             // the body-shape scales that distinguish short/tall and slim/heavy
             // avatars, plus component and shader metadata needed to distinguish
             // naked hands from outfit gloves and lower-arm sleeve replacements.
-            writer.Write(3);
+            // v4: mesh UVs are stored in the texture's own top-left convention.
+            // Every earlier version stored them V-flipped.
+            writer.Write(4);
             writer.Write(poses.joints.Length);
             foreach (PoseJoint joint in poses.joints)
             {
@@ -1145,10 +1147,12 @@ internal static class AvatarImporter
                     VertexCount = vertexCount,
                     Positions = source.positions,
                     Normals = source.normals,
-                    // Face-mask UVs are exported in the PNG's top-left image
-                    // convention already. Pre-invert here because WriteBatch
-                    // performs the general mesh-texture V conversion below.
-                    Uv = InvertV(uv),
+                    // Exported in the PNG's top-left image convention already,
+                    // which since v4 is what the asset stores, so this is
+                    // written through unchanged. It used to be pre-inverted to
+                    // cancel a blanket flip in WriteBatch; that flip was wrong
+                    // for garments and is gone.
+                    Uv = uv,
                     Bindings = source.bindings,
                     Weights = source.weights,
                     Colors = Enumerable.Repeat(1f, vertexCount * 4).ToArray(),
@@ -1158,16 +1162,6 @@ internal static class AvatarImporter
                 });
             }
         }
-    }
-
-    private static float[] InvertV(float[] source)
-    {
-        float[] result = (float[])source.Clone();
-        for (int index = 1; index < result.Length; index += 2)
-        {
-            result[index] = 1f - result[index];
-        }
-        return result;
     }
 
     private static int FaceColorUsage(int textureUsage)
@@ -1366,7 +1360,12 @@ internal static class AvatarImporter
             for (int component = 0; component < 3; component++) writer.Write(batch.Positions[vertex * 3 + component]);
             for (int component = 0; component < 3; component++) writer.Write(batch.Normals[vertex * 3 + component]);
             writer.Write(batch.Uv[vertex * 2]);
-            writer.Write(1f - batch.Uv[vertex * 2 + 1]);
+            // Written through unflipped since v4. The old blanket "1 - v" put
+            // garment atlases upside down - the jacket hem sampled the shirt
+            // strip, so red landed on the abdomen instead of the collar and
+            // cuffs - and was only invisible on faces because those were
+            // pre-inverted to cancel it.
+            writer.Write(batch.Uv[vertex * 2 + 1]);
             for (int component = 0; component < 4; component++) writer.Write((byte)ClampToByte(batch.Bindings[vertex * 4 + component]));
             for (int component = 0; component < 4; component++) writer.Write((byte)ClampToByte(batch.Weights[vertex * 4 + component]));
             for (int component = 0; component < 4; component++) writer.Write((byte)ClampToByte(batch.Colors[vertex * 4 + component] * 255f));

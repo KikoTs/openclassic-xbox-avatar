@@ -2262,6 +2262,21 @@ namespace OpenClassic.XboxAvatar
         internal float FirstPersonScaleLeft;
         internal float FirstPersonScaleRight;
 
+        /// <summary>Mirrors a batch's texture coordinates in V, in place.</summary>
+        private static void FlipBatchV(AvatarBatch batch)
+        {
+            if (batch == null || batch.DrawVertices == null)
+            {
+                return;
+            }
+            for (int index = 0; index < batch.DrawVertices.Length; index++)
+            {
+                Vector2 uv = batch.DrawVertices[index].TextureCoordinate;
+                batch.DrawVertices[index].TextureCoordinate =
+                    new Vector2(uv.X, 1f - uv.Y);
+            }
+        }
+
         internal static AvatarAsset Load(string path)
         {
             using (var stream = File.OpenRead(path))
@@ -2272,7 +2287,7 @@ namespace OpenClassic.XboxAvatar
                     throw new InvalidDataException("Xbox Avatar asset has an invalid signature.");
                 }
                 int version = reader.ReadInt32();
-                if (version != 1 && version != 2 && version != 3)
+                if (version < 1 || version > 4)
                 {
                     throw new InvalidDataException("Unsupported Xbox Avatar asset version " + version + ".");
                 }
@@ -2327,6 +2342,17 @@ namespace OpenClassic.XboxAvatar
                 for (int index = 0; index < batchCount; index++)
                 {
                     asset.Batches[index] = AvatarBatch.Read(reader, version);
+                    // Assets before v4 stored mesh UVs V-flipped, which put
+                    // garment atlases upside down: the jacket hem sampled the
+                    // shirt strip, so red appeared on the abdomen instead of the
+                    // collar and cuffs. Face layers were pre-inverted on import
+                    // to cancel that flip, so they were already correct and must
+                    // not be touched. Correct the rest here so an avatar
+                    // imported before the fix still renders properly.
+                    if (version < 4 && asset.Batches[index].FaceTextureUsage < 0)
+                    {
+                        FlipBatchV(asset.Batches[index]);
+                    }
                     if (asset.Batches[index].IsBaseBody)
                     {
                         asset.BaseBodyBatch = asset.Batches[index];

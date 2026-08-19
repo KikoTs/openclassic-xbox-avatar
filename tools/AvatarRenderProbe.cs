@@ -63,6 +63,8 @@ internal static class AvatarRenderProbe
         int size = 768;
         string onlyBatch = null;
         string dumpTextures = null;
+        string uvMap = null;
+        bool flipV = false;
 
         for (int i = 4; i < args.Length - 1; i++)
         {
@@ -74,6 +76,8 @@ internal static class AvatarRenderProbe
             else if (option == "--size") { size = int.Parse(args[i + 1]); }
             else if (option == "--batch") { onlyBatch = args[i + 1]; }
             else if (option == "--dumptex") { dumpTextures = args[i + 1]; }
+            else if (option == "--uvmap") { uvMap = args[i + 1]; }
+            else if (option == "--flipv") { flipV = args[i + 1] == "1"; }
         }
 
         Assembly mod = Assembly.LoadFrom(Path.GetFullPath(args[0]));
@@ -169,6 +173,7 @@ internal static class AvatarRenderProbe
                 object dv = drawVertices.GetValue(index);
                 if (drawType == null) { drawType = dv.GetType(); }
                 uvs[index] = (Vector2)Field(drawType, dv, "TextureCoordinate");
+                if (flipV) { uvs[index] = new Vector2(uvs[index].X, 1f - uvs[index].Y); }
             }
 
             float uMin = float.MaxValue, uMax = float.MinValue;
@@ -225,6 +230,7 @@ internal static class AvatarRenderProbe
             return 1;
         }
 
+        if (uvMap != null) { RenderUvMap(triangles, uvMap); }
         Render(triangles, args[3], address, alphaCut, view, zoom, size);
         Console.WriteLine(
             "wrote " + args[3] +
@@ -360,6 +366,65 @@ internal static class AvatarRenderProbe
     }
 
     private static int Clamp8(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+    /// <summary>
+    /// Draws the batch's UV triangles over its own texture, tinted by how high
+    /// up the body each triangle sits: blue low, green mid, red high. That
+    /// answers "which part of the atlas does the chest actually sample", which
+    /// a rendered avatar cannot.
+    /// </summary>
+    private static void RenderUvMap(List<Triangle> triangles, string outPath)
+    {
+        Bitmap source = null;
+        float lowest = float.MaxValue, highest = float.MinValue;
+        foreach (Triangle t in triangles)
+        {
+            if (source == null && t.Texture != null) { source = t.Texture; }
+            foreach (Vector3 p in new[] { t.A, t.B, t.C })
+            {
+                if (p.Y < lowest) lowest = p.Y;
+                if (p.Y > highest) highest = p.Y;
+            }
+        }
+        if (source == null) { Console.Error.WriteLine("uvmap: no texture"); return; }
+
+        const int zoom = 6;
+        int width = source.Width * zoom;
+        int height = source.Height * zoom;
+        using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+        using (var graphics = Graphics.FromImage(bitmap))
+        {
+            graphics.InterpolationMode =
+                System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+            graphics.DrawImage(source, 0, 0, width, height);
+
+            foreach (Triangle t in triangles)
+            {
+                float mid = (t.A.Y + t.B.Y + t.C.Y) / 3f;
+                float k = (highest - lowest) < 1e-6f
+                    ? 0.5f
+                    : (mid - lowest) / (highest - lowest);
+                var pen = new Pen(Color.FromArgb(
+                    200,
+                    Clamp8((int)(k * 255)),
+                    Clamp8((int)((1f - Math.Abs(k - 0.5f) * 2f) * 255)),
+                    Clamp8((int)((1f - k) * 255))), 1f);
+
+                PointF[] points =
+                {
+                    new PointF(t.Ua.X * width, t.Ua.Y * height),
+                    new PointF(t.Ub.X * width, t.Ub.Y * height),
+                    new PointF(t.Uc.X * width, t.Uc.Y * height)
+                };
+                graphics.DrawPolygon(pen, points);
+                pen.Dispose();
+            }
+
+            bitmap.Save(outPath, ImageFormat.Png);
+        }
+        Console.WriteLine("wrote uv map " + outPath +
+            " (blue=low on body, red=high) bodyY=[" + lowest + "," + highest + "]");
+    }
 
     private static Vector2 Project(Vector3 p, string view)
     {
