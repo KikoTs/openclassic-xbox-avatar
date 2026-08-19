@@ -4125,29 +4125,38 @@ namespace OpenClassic.XboxAvatar
                     continue;
                 }
 
-                // The held item is a child of this anchor and carries its own
-                // offset from it: a gun sits at the origin, a tool about 0.111
-                // along the anchor's up axis. Stock Castle Miner Z depends on
-                // that, because its anchor is the prop bone well below the palm
-                // and the offset is exactly what lifts the tool into the hand.
-                // Moving the anchor onto the visible grip therefore displaced
-                // such an item a second time, by a distance that grew with the
-                // avatar, which is why it looked worse the taller the player.
+                // Adjust the game's own placement rather than replacing it.
                 //
-                // Aim the anchor so that the item lands on the grip instead of
-                // the anchor doing so. A gun is unaffected, its offset is zero.
+                // Castle Miner Z already puts the item correctly in a hand: it
+                // anchors to the prop bone and every item's own offset from that
+                // anchor is authored against it. All the imported avatar changes
+                // is that its prop bone sits further below the palm than the
+                // stock rig's does. So shift by exactly that difference and
+                // leave everything else the game does intact.
+                //
+                // Writing the absolute grip position instead threw away the
+                // game's placement altogether and moved items about 23 cm up,
+                // which is why they ended up out of the hand entirely.
+                Vector3 propToGrip = Vector3.Zero;
+                Vector3 importedProp;
+                if (imported.TryGetAvatarSpaceBone(
+                        AvatarBone.PropRight, out importedProp))
+                {
+                    propToGrip = target - importedProp;
+                }
+
+                transform.Translation =
+                    stockAnchor
+                    + propToGrip
+                    // Editable per-height nudge, for trimming the fit without a
+                    // rebuild. Zero unless the tuning file says otherwise.
+                    + ItemTuning.OffsetFor(shape);
+
                 Vector3 childOffset = Vector3.Zero;
                 if (itemAnchor.Children != null && itemAnchor.Children.Count > 0)
                 {
                     childOffset = itemAnchor.Children[0].LocalToParent.Translation;
                 }
-
-                transform.Translation =
-                    target
-                    - Vector3.TransformNormal(childOffset, transform)
-                    // Editable per-height nudge, for trimming the fit without a
-                    // rebuild. Zero unless the tuning file says otherwise.
-                    + ItemTuning.OffsetFor(shape);
 
                 itemAnchor.LocalToParent = transform;
 
@@ -4173,16 +4182,18 @@ namespace OpenClassic.XboxAvatar
                 Report(binding,
                     "build=" + shape.ToString("F3") +
                     " item=" + item +
-                    " grip=" + target +
+                    " stockAnchor=" + stockAnchor +
+                    " shift=" + propToGrip +
+                    " shiftLen=" + propToGrip.Length().ToString("F4") +
+                    // Echo the tuning actually in force, so a saved edit can be
+                    // confirmed as picked up without restarting anything.
+                    " tuning=" + ItemTuning.OffsetFor(shape) +
                     (haveWrist
-                        ? " wrist=" + wrist +
-                          " gripToWrist=" + Vector3.Distance(target, wrist).ToString("F4")
+                        ? " gripToWrist=" + Vector3.Distance(target, wrist).ToString("F4")
                         : " wrist=?") +
                     (haveProp
-                        ? " prop=" + prop +
-                          " gripToProp=" + Vector3.Distance(target, prop).ToString("F4")
+                        ? " gripToProp=" + Vector3.Distance(target, prop).ToString("F4")
                         : " prop=?") +
-                    " stockAnchor=" + stockAnchor +
                     " childOffset=" + childOffset +
                     " child0=" + (itemAnchor.Children != null && itemAnchor.Children.Count > 0
                         ? itemAnchor.Children[0].GetType().Name
