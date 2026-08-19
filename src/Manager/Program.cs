@@ -77,14 +77,32 @@ if (localInstallMode && alreadyHooked)
     PauseWhenDoubleClicked(launchedByDoubleClick);
     return 0;
 }
-Instruction[] constructorCalls = instructions.Where(instruction =>
-    instruction.OpCode.Code == Code.Newobj &&
-    instruction.Operand is IMethod method &&
-    method.DeclaringType.FullName == "DNA.Avatars.AvatarModelEntity" &&
-    method.Name == ".ctor").ToArray();
+// 1.9.9 moved the stock proxy model entity into the game assembly and renamed
+// it. It is constructed at the same point in Player::.ctor and has the same
+// shape, so accept whichever name this client uses.
+string[] stockModelEntityTypes =
+{
+    "DNA.Avatars.AvatarModelEntity",      // pre-1.9.9
+    "DNA.CastleMinerZ.PlayerModelEntity", // 1.9.9 and later
+};
+Instruction[] constructorCalls = Array.Empty<Instruction>();
+foreach (string stockModelEntityType in stockModelEntityTypes)
+{
+    constructorCalls = instructions.Where(instruction =>
+        instruction.OpCode.Code == Code.Newobj &&
+        instruction.Operand is IMethod method &&
+        method.DeclaringType.FullName == stockModelEntityType &&
+        method.Name == ".ctor").ToArray();
+    if (constructorCalls.Length > 0)
+    {
+        break;
+    }
+}
 if (!alreadyHooked && constructorCalls.Length != 1)
 {
-    throw new InvalidOperationException("Expected exactly one AvatarModelEntity construction in Player::.ctor; found " + constructorCalls.Length + ".");
+    throw new InvalidOperationException(
+        "Expected exactly one stock model entity construction in Player::.ctor (" +
+        string.Join(" or ", stockModelEntityTypes) + "); found " + constructorCalls.Length + ".");
 }
 
 if (!alreadyHooked)

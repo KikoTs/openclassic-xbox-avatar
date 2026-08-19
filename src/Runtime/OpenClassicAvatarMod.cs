@@ -16,11 +16,21 @@ using DNA.Reflection;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 
+// 1.9.9 moved the stock proxy model entity into the game assembly and
+// renamed it. The type is otherwise identical - same SkinnedModelEntity
+// base, same lighting fields, same .ctor(Model) - so an alias is enough.
+// build.ps1 defines this symbol when the target client is 1.9.9 or later.
+#if CMZ_MODERN_MODEL_ENTITY
+using StockModelEntity = DNA.CastleMinerZ.PlayerModelEntity;
+#else
+using StockModelEntity = DNA.Avatars.AvatarModelEntity;
+#endif
+
 namespace OpenClassic.XboxAvatar
 {
     public static class AvatarEntityFactory
     {
-        public static AvatarModelEntity Create(Model fallbackModel, Avatar avatar, NetworkGamer gamer)
+        public static StockModelEntity Create(Model fallbackModel, Avatar avatar, NetworkGamer gamer)
         {
             AvatarNetworkBridge.NotePlayer(gamer, avatar, fallbackModel);
             string assetPath = AvatarNetworkBridge.GetAssetPath(gamer);
@@ -35,11 +45,11 @@ namespace OpenClassic.XboxAvatar
                     ImportedAvatarModelEntity.WriteFailure(exception);
                 }
             }
-            return new AvatarModelEntity(fallbackModel);
+            return new StockModelEntity(fallbackModel);
         }
     }
 
-    internal sealed class ImportedAvatarModelEntity : AvatarModelEntity
+    internal sealed class ImportedAvatarModelEntity : StockModelEntity
     {
         private readonly Avatar _avatar;
         private readonly AvatarAsset _asset;
@@ -75,7 +85,7 @@ namespace OpenClassic.XboxAvatar
             // has deliberately bulky first-person glove geometry.  Its 71-bone
             // skeleton matches ProxyBoy, so always use ProxyBoy's dedicated,
             // continuous hand topology as the Xbox surface carrier while the
-            // live AvatarModelEntity continues to supply the current pose.
+            // live StockModelEntity continues to supply the current pose.
             Model handCarrierModel = fallbackModel;
             try
             {
@@ -3848,8 +3858,8 @@ namespace OpenClassic.XboxAvatar
 
             try
             {
-                AvatarModelEntity previous =
-                    binding.Avatar.ProxyModelEntity as AvatarModelEntity;
+                StockModelEntity previous =
+                    binding.Avatar.ProxyModelEntity as StockModelEntity;
                 var replacement = new ImportedAvatarModelEntity(
                     binding.FallbackModel,
                     binding.Avatar,

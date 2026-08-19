@@ -18,6 +18,35 @@ foreach ($required in @($gameExe, $commonDll)) {
     }
 }
 
+# 1.9.9 moved the stock proxy model entity out of DNA.Common and renamed it
+# DNA.CastleMinerZ.PlayerModelEntity. The runtime aliases whichever name the
+# target client actually defines, so detect it here. Type names live as UTF-8
+# in the metadata string heap, which makes a byte scan sufficient and keeps
+# this script free of a metadata-reader dependency.
+function Test-ModernModelEntity {
+    param([Parameter(Mandatory = $true)][string]$Assembly)
+
+    $needle = [Text.Encoding]::UTF8.GetBytes('PlayerModelEntity')
+    $bytes = [IO.File]::ReadAllBytes($Assembly)
+    $last = $bytes.Length - $needle.Length
+    for ($i = 0; $i -le $last; $i++) {
+        if ($bytes[$i] -ne $needle[0]) { continue }
+        $match = $true
+        for ($j = 1; $j -lt $needle.Length; $j++) {
+            if ($bytes[$i + $j] -ne $needle[$j]) { $match = $false; break }
+        }
+        if ($match) { return $true }
+    }
+    return $false
+}
+
+$modernModelEntity = Test-ModernModelEntity -Assembly $gameExe
+if ($modernModelEntity) {
+    Write-Host 'Target client defines PlayerModelEntity (1.9.9 or later).' -ForegroundColor Cyan
+} else {
+    Write-Host 'Target client defines AvatarModelEntity (pre-1.9.9).' -ForegroundColor Cyan
+}
+
 $artifacts = Join-Path $repoRoot 'artifacts'
 $bin = Join-Path $artifacts 'bin'
 $obj = Join-Path $artifacts 'obj'
@@ -78,6 +107,9 @@ $runtimeArguments = @(
     "/reference:$xnaGame",
     $runtimeSource
 )
+if ($modernModelEntity) {
+    $runtimeArguments = @('/define:CMZ_MODERN_MODEL_ENTITY') + $runtimeArguments
+}
 Invoke-Native 'Runtime compilation' { & $frameworkCsc $runtimeArguments }
 
 $importerOut = Join-Path $bin 'Import Xbox Avatar.exe'
