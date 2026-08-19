@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Reflection;
+using DNA.Net.GamerServices;
 using Microsoft.Xna.Framework;
 using Color = System.Drawing.Color;
 
@@ -65,6 +66,8 @@ internal static class AvatarRenderProbe
         string dumpTextures = null;
         string uvMap = null;
         bool flipV = false;
+        bool markers = false;
+        float buildScale = 1f;
 
         for (int i = 4; i < args.Length - 1; i++)
         {
@@ -78,6 +81,8 @@ internal static class AvatarRenderProbe
             else if (option == "--dumptex") { dumpTextures = args[i + 1]; }
             else if (option == "--uvmap") { uvMap = args[i + 1]; }
             else if (option == "--flipv") { flipV = args[i + 1] == "1"; }
+            else if (option == "--markers") { markers = args[i + 1] == "1"; }
+            else if (option == "--scale") { buildScale = float.Parse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture); }
         }
 
         Assembly mod = Assembly.LoadFrom(Path.GetFullPath(args[0]));
@@ -93,6 +98,13 @@ internal static class AvatarRenderProbe
         // which is what the runtime's export-space pose reduces to when no
         // animation is playing. Build scale rides in the root, as in the game.
         int[] parents = DefaultParents(mod);
+        // Scaling the root reproduces what the editor's height slider does, so
+        // one avatar can be checked across the whole build range.
+        if (Math.Abs(buildScale - 1f) > 1e-6f)
+        {
+            sourceLocal[0] = Matrix.CreateScale(buildScale) * sourceLocal[0];
+        }
+
         Matrix[] world = new Matrix[sourceLocal.Length];
         world[0] = sourceLocal[0];
         for (int bone = 1; bone < sourceLocal.Length; bone++)
@@ -104,6 +116,44 @@ internal static class AvatarRenderProbe
         for (int bone = 0; bone < world.Length; bone++)
         {
             skin[bone] = inverseBind[bone] * world[bone];
+        }
+
+        // Where the item anchor ends up, so it can be seen against the hand it
+        // is supposed to sit in rather than only asserted numerically.
+        var markerPoints = new List<KeyValuePair<Vector3, Color>>();
+        if (markers)
+        {
+            Type entityType = ModType(mod, "ImportedAvatarModelEntity");
+            MethodInfo grip = entityType.GetMethod(
+                "ComputeThirdPersonGripTranslation", Hidden, null,
+                new[]
+                {
+                    typeof(Vector3), typeof(Vector3), typeof(Vector3),
+                    typeof(Vector3), typeof(Vector3), typeof(Vector3), typeof(float)
+                }, null);
+
+            Vector3 prop = Exported(world, AvatarBone.PropRight);
+            Vector3 target = (Vector3)grip.Invoke(null, new object[]
+            {
+                prop,
+                Exported(world, AvatarBone.FingerIndexRight),
+                Exported(world, AvatarBone.FingerMiddleRight),
+                Exported(world, AvatarBone.FingerRingRight),
+                Exported(world, AvatarBone.FingerSmallRight),
+                Exported(world, AvatarBone.FingerThumbRight),
+                RootScale(sourceLocal)
+            });
+
+            // Red: the stock prop bone the game would use. Green: where the
+            // add-on moves the item to. Green must sit inside the fingers.
+            markerPoints.Add(new KeyValuePair<Vector3, Color>(
+                Unexport(prop), Color.Red));
+            markerPoints.Add(new KeyValuePair<Vector3, Color>(
+                Unexport(target), Color.Lime));
+            Console.WriteLine(
+                "build=" + RootScale(sourceLocal).ToString("F3") +
+                " prop=" + prop + " grip=" + target +
+                " lift=" + (target.Y - prop.Y).ToString("F4"));
         }
 
         var triangles = new List<Triangle>();
@@ -231,7 +281,7 @@ internal static class AvatarRenderProbe
         }
 
         if (uvMap != null) { RenderUvMap(triangles, uvMap); }
-        Render(triangles, args[3], address, alphaCut, view, zoom, size);
+        Render(triangles, args[3], address, alphaCut, view, zoom, size, markerPoints);
         Console.WriteLine(
             "wrote " + args[3] +
             " triangles=" + triangles.Count +
@@ -253,7 +303,8 @@ internal static class AvatarRenderProbe
 
     private static void Render(
         List<Triangle> triangles, string outPath, string address,
-        int alphaCut, string view, string zoom, int size)
+        int alphaCut, string view, string zoom, int size,
+        List<KeyValuePair<Vector3, Color>> markerPoints)
     {
         // Project orthographically: the goal is a readable, repeatable picture,
         // not a match for the game's camera.
@@ -271,7 +322,14 @@ internal static class AvatarRenderProbe
             }
         }
 
-        if (zoom == "head")
+        if (zoom == "hand" && markerPoints.Count > 0)
+        {
+            Vector2 c = Project(markerPoints[0].Key, view);
+            float r = Math.Max(maxY - minY, 1e-4f) * 0.12f;
+            minX = c.X - r; maxX = c.X + r;
+            minY = c.Y - r; maxY = c.Y + r;
+        }
+        else if (zoom == "head")
         {
             // Top fifth of the body, which is where the face layers live.
             float span = maxY - minY;
@@ -361,8 +419,43 @@ internal static class AvatarRenderProbe
                     bitmap.SetPixel(x, y, Color.FromArgb(255, Clamp8(r), Clamp8(g), Clamp8(b)));
                 }
             }
+            using (var graphics = Graphics.FromImage(bitmap))
+            {
+                foreach (KeyValuePair<Vector3, Color> marker in markerPoints)
+                {
+                    Vector2 p = ToScreen(marker.Key, view, scale, offsetX, offsetY);
+                    using (var pen = new Pen(marker.Value, 2f))
+                    {
+                        graphics.DrawLine(pen, p.X - 9, p.Y, p.X + 9, p.Y);
+                        graphics.DrawLine(pen, p.X, p.Y - 9, p.X, p.Y + 9);
+                        graphics.DrawEllipse(pen, p.X - 5, p.Y - 5, 10, 10);
+                    }
+                }
+            }
             bitmap.Save(outPath, ImageFormat.Png);
         }
+    }
+
+    /// <summary>Bone position in the runtime's export space (Z mirrored).</summary>
+    private static Vector3 Exported(Matrix[] world, AvatarBone bone)
+    {
+        Vector3 p = world[(int)bone].Translation;
+        return new Vector3(p.X, p.Y, -p.Z);
+    }
+
+    private static Vector3 Unexport(Vector3 p)
+    {
+        return new Vector3(p.X, p.Y, -p.Z);
+    }
+
+    private static float RootScale(Matrix[] sourceLocal)
+    {
+        Vector3 scale; Quaternion rotation; Vector3 translation;
+        if (!sourceLocal[0].Decompose(out scale, out rotation, out translation))
+        {
+            return 1f;
+        }
+        return (scale.X + scale.Y + scale.Z) / 3f;
     }
 
     private static int Clamp8(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }

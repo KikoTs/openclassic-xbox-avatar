@@ -3921,6 +3921,64 @@ namespace OpenClassic.XboxAvatar
                 }
 
                 itemAnchor.LocalToParent = transform;
+
+                // The grip itself is verified correct offline against every
+                // build height, so an item still hanging below the hand means
+                // the write is not reaching the item or is being overwritten
+                // afterwards. Record what went in and what the anchor and its
+                // child actually hold, so the two can be compared.
+                LogAnchorState(binding, itemAnchor, transform, shape);
+            }
+        }
+
+        private static readonly Dictionary<byte, string> AnchorReport =
+            new Dictionary<byte, string>();
+        private static DateTime _nextAnchorReportUtc = DateTime.MinValue;
+
+        private static void LogAnchorState(
+            PlayerBinding binding,
+            Entity itemAnchor,
+            Matrix written,
+            float shape)
+        {
+            try
+            {
+                Entity child = itemAnchor.Children != null &&
+                    itemAnchor.Children.Count > 0
+                        ? itemAnchor.Children[0]
+                        : null;
+
+                byte key = binding.Gamer == null ? (byte)255 : binding.Gamer.Id;
+                AnchorReport[key] =
+                    "build=" + shape.ToString("F3") +
+                    " wrote=" + written.Translation +
+                    " anchorNow=" + itemAnchor.LocalToParent.Translation +
+                    " children=" + (itemAnchor.Children == null
+                        ? "null"
+                        : itemAnchor.Children.Count.ToString()) +
+                    " child0=" + (child == null
+                        ? "none"
+                        : child.GetType().Name + "@" +
+                          child.LocalToParent.Translation);
+
+                DateTime now = DateTime.UtcNow;
+                if (now < _nextAnchorReportUtc)
+                {
+                    return;
+                }
+                _nextAnchorReportUtc = now.AddSeconds(2);
+
+                string folder = Branding.AvatarFolder(
+                    AppDomain.CurrentDomain.BaseDirectory);
+                Directory.CreateDirectory(folder);
+                var lines = new List<string>(AnchorReport.Values);
+                File.WriteAllLines(
+                    Path.Combine(folder, "anchor-status.log"),
+                    lines.ToArray());
+            }
+            catch
+            {
+                // Diagnostics must never break rendering.
             }
         }
 
