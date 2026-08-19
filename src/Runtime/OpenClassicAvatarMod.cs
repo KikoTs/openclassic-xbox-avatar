@@ -61,6 +61,24 @@ namespace OpenClassic.XboxAvatar
         private static DateTime _nextCheckUtc = DateTime.MinValue;
         private static bool _loaded;
 
+        /// <summary>What the tuning file currently holds, for the status log.</summary>
+        internal static string Describe()
+        {
+            Refresh();
+            if (Rows.Count == 0)
+            {
+                return "not loaded (no rows parsed)";
+            }
+            var text = new System.Text.StringBuilder();
+            text.Append(Rows.Count).Append(" rows:");
+            foreach (KeyValuePair<float, Vector3> row in Rows)
+            {
+                text.Append(" ").Append(row.Key.ToString("F2"))
+                    .Append("=").Append(row.Value.Y.ToString("F3"));
+            }
+            return text.ToString();
+        }
+
         internal static Vector3 OffsetFor(float build)
         {
             Refresh();
@@ -4256,8 +4274,15 @@ namespace OpenClassic.XboxAvatar
                 string folder = Branding.AvatarFolder(
                     AppDomain.CurrentDomain.BaseDirectory);
                 Directory.CreateDirectory(folder);
-                var lines = new List<string>(AnchorReport.Values);
-                lines.Sort(StringComparer.OrdinalIgnoreCase);
+                var lines = new List<string>();
+                // Lead with the tuning state so a saved edit can be confirmed as
+                // read even when no avatar is present to apply it to - otherwise
+                // "nothing happens" is ambiguous between the file not loading and
+                // there being nothing to tune.
+                lines.Add("tuning file: " + ItemTuning.Describe());
+                var players = new List<string>(AnchorReport.Values);
+                players.Sort(StringComparer.OrdinalIgnoreCase);
+                lines.AddRange(players);
                 File.WriteAllLines(
                     Path.Combine(folder, "anchor-status.log"),
                     lines.ToArray());
