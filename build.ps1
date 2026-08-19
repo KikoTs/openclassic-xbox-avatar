@@ -7,7 +7,13 @@ param(
     # installer's brand: its own namespace, game-folder layout and file names,
     # with no OpenClassic naming anywhere in the shipped binaries.
     [ValidateSet('OpenClassic', 'XboxAvatar')]
-    [string]$Brand = 'OpenClassic'
+    [string]$Brand = 'OpenClassic',
+
+    # An .ocavatar for the smoke tests to parse. Only a fixture - it is never
+    # shipped and need not belong to the client being built against, which
+    # matters because a clean 1.6 install has no avatar in it and would
+    # otherwise skip two of the three tests.
+    [string]$SampleAvatar
 )
 
 $ErrorActionPreference = 'Stop'
@@ -272,6 +278,37 @@ try {
 }
 finally {
     Pop-Location
+}
+
+# Run the smoke tests, rather than merely compiling them. They were being built
+# and left on disk, so a regression any of them was written to catch would have
+# shipped with a green build.
+$sampleAvatar = if ($SampleAvatar) { $SampleAvatar }
+                else { Join-Path $GameDirectory 'avatar.ocavatar' }
+$smokeTests = @(
+    @{ Name      = 'AvatarProtocolSmoke'
+       Arguments = @($runtimeOut, $sampleAvatar, $GameDirectory)
+       Needs     = $sampleAvatar },
+    @{ Name      = 'AvatarMessageIdSmoke'
+       Arguments = @((Join-Path $GameDirectory 'CastleMinerZ.exe'), $commonDll, $runtimeOut)
+       Needs     = $null },
+    @{ Name      = 'AvatarAttachmentSmoke'
+       Arguments = @($runtimeOut, $sampleAvatar, $GameDirectory)
+       Needs     = $sampleAvatar }
+)
+
+Write-Host ''
+Write-Host 'Smoke tests:' -ForegroundColor Green
+foreach ($smokeTest in $smokeTests) {
+    $smokeExe = Join-Path $bin ($smokeTest.Name + '.exe')
+    if ($smokeTest.Needs -and -not (Test-Path -LiteralPath $smokeTest.Needs)) {
+        # Two of these need a real avatar to load. Say so rather than passing
+        # quietly, so a skipped test is never mistaken for a green one.
+        Write-Host ("  SKIP {0}: no {1}" -f $smokeTest.Name, $smokeTest.Needs) -ForegroundColor Yellow
+        continue
+    }
+    $smokeArguments = $smokeTest.Arguments
+    Invoke-Native $smokeTest.Name { & $smokeExe @smokeArguments }
 }
 
 Write-Host ''

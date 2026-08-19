@@ -1574,6 +1574,49 @@ namespace OpenClassic.XboxAvatar
                 _runtimeLocalBones[bone];
         }
 
+        /// <summary>
+        /// Give back the textures and effect this model owns.
+        ///
+        /// Every avatar applied builds a fresh asset with its own textures -
+        /// there is no shared cache, so nothing else can be holding these - and
+        /// XNA keeps a device-side reference to each one, so dropping the
+        /// managed object does not reclaim any of it. A player rejoining or
+        /// changing avatar therefore leaked a whole texture set each time, and
+        /// the game is a 32-bit process: over a long session that is what runs
+        /// it out of address space and kills it with no exception to catch.
+        ///
+        /// Only ever called on a model already detached from the avatar, so no
+        /// draw can be in flight against it.
+        /// </summary>
+        internal void ReleaseGraphicsResources()
+        {
+            try
+            {
+                if (_effect != null)
+                {
+                    _effect.Dispose();
+                    _effect = null;
+                }
+                if (_asset == null || _asset.Batches == null)
+                {
+                    return;
+                }
+                foreach (AvatarBatch batch in _asset.Batches)
+                {
+                    if (batch != null && batch.Texture != null)
+                    {
+                        batch.Texture.Dispose();
+                        batch.Texture = null;
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                // Never let tidying up take the game down with it.
+                WriteFailure(exception);
+            }
+        }
+
         private void EnsureGraphicsResources(GraphicsDevice device)
         {
             if (_effect == null)
@@ -4059,8 +4102,22 @@ namespace OpenClassic.XboxAvatar
                 if (Players.TryGetValue(gamer.Id, out binding) &&
                     binding.Gamer != gamer)
                 {
+                    // The previous occupant's model goes with the binding, so
+                    // hand its textures back rather than leaving them on the
+                    // device for the rest of the session.
+                    if (binding.Avatar != null)
+                    {
+                        var retired = binding.Avatar.ProxyModelEntity as
+                            ImportedAvatarModelEntity;
+                        if (retired != null)
+                        {
+                            binding.Avatar.ProxyModelEntity = null;
+                            retired.ReleaseGraphicsResources();
+                        }
+                    }
                     Players.Remove(gamer.Id);
                     RemoteAssetPaths.Remove(gamer.Id);
+                    AnchorReport.Remove(gamer.Id);
                 }
                 PendingHello.Remove(gamer.Id);
                 HelloSent.Remove(gamer.Id);
@@ -4428,6 +4485,10 @@ namespace OpenClassic.XboxAvatar
                     Report(binding, "no imported avatar (stock model)");
                 }
             }
+
+            // Every avatar has updated by now, so this frame's collection is
+            // complete and can be written.
+            FlushAnchorReport();
         }
 
         private static PlayerBinding FindBinding(Avatar avatar)
@@ -4575,6 +4636,16 @@ namespace OpenClassic.XboxAvatar
 
                 itemAnchor.LocalToParent = transform;
 
+                // Everything below is diagnostics only. It runs at the log's
+                // own cadence rather than every frame: built per frame per
+                // player it rebuilt the export pose twice more and produced a
+                // long string sixty times a second, all of it to describe a
+                // file written once every two seconds.
+                if (!ReportDue)
+                {
+                    return;
+                }
+
                 // "item" is where the held object actually ends up once its own
                 // offset is applied, and "grip" is where the fingers are. Those
                 // two matching is the thing that matters; the anchor sitting
@@ -4619,12 +4690,27 @@ namespace OpenClassic.XboxAvatar
         private static readonly Dictionary<byte, string> AnchorReport =
             new Dictionary<byte, string>();
         private static DateTime _nextAnchorReportUtc = DateTime.MinValue;
+        private static bool _reportArmed;
 
         /// <summary>
-        /// One line per player, rewritten as the scene changes. Third person is
-        /// only ever visible on somebody else, so this has to describe remote
-        /// players as well as the local one, including the ones that are
-        /// deliberately skipped.
+        /// Whether this frame is a reporting frame. Callers use it to skip
+        /// building a diagnostic they would only throw away.
+        ///
+        /// Armed for a whole frame rather than until the first write, so every
+        /// player still describes itself in the same pass. Gating on the write
+        /// clock instead would let the first player consume the window and
+        /// leave everyone else's line stale.
+        /// </summary>
+        private static bool ReportDue
+        {
+            get { return _reportArmed; }
+        }
+
+        /// <summary>
+        /// One line per player, collected during a reporting frame and written
+        /// once at the end of it. Third person is only ever visible on somebody
+        /// else, so this has to describe remote players as well as the local
+        /// one, including the ones that are deliberately skipped.
         /// </summary>
         private static void Report(PlayerBinding binding, string detail)
         {
@@ -4642,13 +4728,35 @@ namespace OpenClassic.XboxAvatar
                     (gamer == null ? "?" : gamer.Gamertag) +
                     (gamer != null && gamer.IsLocal ? " [local]" : " [remote]") +
                     "  " + detail;
+            }
+            catch (Exception exception)
+            {
+                ImportedAvatarModelEntity.WriteFailure(exception);
+            }
+        }
 
-                DateTime now = DateTime.UtcNow;
-                if (now < _nextAnchorReportUtc)
+        /// <summary>
+        /// Write what this frame collected, then decide when to collect next.
+        /// Runs once per frame from the game-update epilogue, after every
+        /// avatar has had its turn.
+        /// </summary>
+        private static void FlushAnchorReport()
+        {
+            try
+            {
+                if (!_reportArmed)
                 {
+                    if (DateTime.UtcNow >= _nextAnchorReportUtc)
+                    {
+                        // Collect during the next frame and write at the end of
+                        // it: the avatars update before this point, so arming
+                        // now is the earliest a full set can be gathered.
+                        _reportArmed = true;
+                    }
                     return;
                 }
-                _nextAnchorReportUtc = now.AddSeconds(2);
+                _reportArmed = false;
+                _nextAnchorReportUtc = DateTime.UtcNow.AddSeconds(2);
 
                 string folder = Branding.AvatarFolder(
                     AppDomain.CurrentDomain.BaseDirectory);
@@ -4882,6 +4990,16 @@ namespace OpenClassic.XboxAvatar
                             replacement.DirectLightDirection.Length));
                 }
                 binding.Avatar.ProxyModelEntity = replacement;
+
+                // The setter has detached the old model, so nothing can draw it
+                // any more and its textures can go back. Without this every
+                // avatar change or rejoin leaked a texture set for the rest of
+                // the session.
+                var retired = previous as ImportedAvatarModelEntity;
+                if (retired != null && retired != replacement)
+                {
+                    retired.ReleaseGraphicsResources();
+                }
 
                 // Entity.Update walks children in order, and a held item
                 // records the world matrix it will draw with during that walk.
