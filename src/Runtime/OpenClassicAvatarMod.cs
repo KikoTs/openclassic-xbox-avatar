@@ -650,6 +650,35 @@ namespace OpenClassic.XboxAvatar
             }
         }
 
+        /// <summary>
+        /// Correct the held item's anchor here, inside the avatar's own update.
+        ///
+        /// Avatar.UpdateParts rewrites that anchor from the stock rig at the
+        /// top of every avatar update, and the held item snapshots its own
+        /// world matrix into ModelEntity._worldBoneTransforms further down the
+        /// same child walk - Draw only replays that snapshot. So a correction
+        /// made after the walk, for instance at the end of the game update, is
+        /// written into a matrix nothing reads and is overwritten before the
+        /// next walk begins. It never reaches the screen whatever value it
+        /// holds, which is why every earlier attempt to move the item, and
+        /// every tuning offset however large, appeared to do nothing at all.
+        ///
+        /// This model entity is a child of the avatar and is ordered ahead of
+        /// the prop part, so running here lands between the two.
+        /// </summary>
+        protected override void OnUpdate(GameTime gameTime)
+        {
+            base.OnUpdate(gameTime);
+            try
+            {
+                AvatarNetworkBridge.ApplyItemAnchor(_avatar, this);
+            }
+            catch (Exception exception)
+            {
+                WriteFailure(exception);
+            }
+        }
+
         private Matrix RenderWorld
         {
             get
@@ -4237,6 +4266,11 @@ namespace OpenClassic.XboxAvatar
             }
         }
 
+        /// <summary>
+        /// Report the players this cannot help. The correction itself runs in
+        /// <see cref="ImportedAvatarModelEntity.OnUpdate"/>, which is the only
+        /// point in the frame where writing the anchor has any effect.
+        /// </summary>
         private static void ApplyThirdPersonItemAnchors()
         {
             foreach (PlayerBinding binding in Players.Values)
@@ -4245,21 +4279,47 @@ namespace OpenClassic.XboxAvatar
                 {
                     continue;
                 }
-                var imported = binding.Avatar.ProxyModelEntity as
-                    ImportedAvatarModelEntity;
-                if (imported == null)
+                if (!(binding.Avatar.ProxyModelEntity is ImportedAvatarModelEntity))
                 {
                     // Not an error: this player has no imported avatar yet, so
                     // there is no custom grip to apply. Report it anyway, since
                     // third person is only ever seen on a remote player and a
                     // silent skip is indistinguishable from a broken hook.
                     Report(binding, "no imported avatar (stock model)");
-                    continue;
                 }
+            }
+        }
 
-                Entity itemAnchor = binding.Avatar.GetAvatarPart(
+        private static PlayerBinding FindBinding(Avatar avatar)
+        {
+            foreach (PlayerBinding binding in Players.Values)
+            {
+                if (binding != null && binding.Avatar == avatar)
+                {
+                    return binding;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Seat one avatar's held item. Called from the imported model's own
+        /// update so the write lands after Avatar.UpdateParts has reset the
+        /// anchor and before the item samples it.
+        /// </summary>
+        internal static void ApplyItemAnchor(
+            Avatar avatar,
+            ImportedAvatarModelEntity imported)
+        {
+            if (avatar == null || imported == null)
+            {
+                return;
+            }
+            PlayerBinding binding = FindBinding(avatar);
+            {
+                Entity itemAnchor = avatar.GetAvatarPart(
                     AvatarBone.PropRight);
-                Matrix transform = binding.Avatar.GetBoneToAvatar(
+                Matrix transform = avatar.GetBoneToAvatar(
                     AvatarBone.PropRight);
                 float shape = imported.AvatarShapeScale;
 
@@ -4277,10 +4337,10 @@ namespace OpenClassic.XboxAvatar
                 if (!imported.TryGetThirdPersonPropTranslation(out target))
                 {
                     Report(binding, "no third-person grip" +
-                        (binding.Avatar.HideHead
+                        (avatar.HideHead
                             ? " (first person, expected)"
                             : " (UNEXPECTED: head is visible)"));
-                    continue;
+                    return;
                 }
 
                 // Why the stock anchor is wrong at all, and by how much:
@@ -4397,6 +4457,12 @@ namespace OpenClassic.XboxAvatar
         /// </summary>
         private static void Report(PlayerBinding binding, string detail)
         {
+            if (binding == null)
+            {
+                // An avatar with no binding yet: nothing to name the line
+                // after, and it will report itself once the player is tracked.
+                return;
+            }
             try
             {
                 NetworkGamer gamer = binding.Gamer;
@@ -4645,6 +4711,19 @@ namespace OpenClassic.XboxAvatar
                             replacement.DirectLightDirection.Length));
                 }
                 binding.Avatar.ProxyModelEntity = replacement;
+
+                // Entity.Update walks children in order, and a held item
+                // records the world matrix it will draw with during that walk.
+                // Installing the model appends it after the prop part, so move
+                // the part to the end: the anchor correction runs in this
+                // model's update and has to happen before the item reads it.
+                Entity propPart = binding.Avatar.GetAvatarPart(
+                    AvatarBone.PropRight);
+                if (binding.Avatar.Children.Remove(propPart))
+                {
+                    binding.Avatar.Children.Add(propPart);
+                }
+
                 binding.AppliedHash = hashText;
             }
             catch (Exception exception)
