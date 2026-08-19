@@ -30,7 +30,18 @@ namespace OpenClassic.XboxAvatar
 {
     public static class AvatarEntityFactory
     {
-        public static StockModelEntity Create(Model fallbackModel, Avatar avatar, NetworkGamer gamer)
+        // Returns the shared SkinnedModelEntity base rather than the concrete
+        // stock entity, and that matters on 1.9.9. The patcher inserts a call to
+        // this method into Player..ctor, which means the call's signature is
+        // written into the game assembly's metadata. From 1.9.9 the concrete
+        // type lives in the game assembly itself, and importing a signature that
+        // names a type from the target module emits a member reference scoped to
+        // the wrong assembly - the CLR then cannot resolve it and Player..ctor
+        // fails to JIT the moment a player is built. SkinnedModelEntity lives in
+        // DNA.Common on every client, so the reference stays resolvable.
+        // It is also exactly what Avatar.set_ProxyModelEntity takes, so the call
+        // site needs no cast.
+        public static SkinnedModelEntity Create(Model fallbackModel, Avatar avatar, NetworkGamer gamer)
         {
             AvatarNetworkBridge.NotePlayer(gamer, avatar, fallbackModel);
             string assetPath = AvatarNetworkBridge.GetAssetPath(gamer);
