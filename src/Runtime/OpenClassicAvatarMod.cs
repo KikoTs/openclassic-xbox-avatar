@@ -102,6 +102,25 @@ namespace OpenClassic.XboxAvatar
         private static Placement _mode = Placement.Hand;
         private static Vector3 _global;
         private static bool _handSpace = true;
+        private static bool _meshHands;
+
+        /// <summary>
+        /// Whether first person draws the avatar's own hand mesh instead of
+        /// re-projecting the stock ProxyBoy hand onto its surface.
+        ///
+        /// This is the one real difference between the two views: third person
+        /// draws the hand the avatar has, first person rebuilds a different
+        /// hand to match it. Everything that has looked wrong in first person
+        /// and right in third comes from that rebuild.
+        /// </summary>
+        internal static bool MeshHands
+        {
+            get
+            {
+                Refresh();
+                return _meshHands;
+            }
+        }
         private static DateTime _stampUtc;
         private static DateTime _nextCheckUtc = DateTime.MinValue;
         private static bool _loaded;
@@ -147,6 +166,7 @@ namespace OpenClassic.XboxAvatar
             Refresh();
             var text = new System.Text.StringBuilder();
             text.Append("mode=").Append(_mode.ToString().ToLowerInvariant());
+            text.Append(" hands=").Append(_meshHands ? "mesh" : "carrier");
             text.Append(" space=").Append(_handSpace ? "hand" : "avatar");
             text.Append(" offset=").Append(_global);
             foreach (KeyValuePair<string, Vector3> item in Items)
@@ -258,6 +278,7 @@ namespace OpenClassic.XboxAvatar
             _mode = Placement.Hand;
             _global = Vector3.Zero;
             _handSpace = true;
+            _meshHands = false;
             foreach (string raw in lines)
             {
                 string line = raw.Trim();
@@ -299,6 +320,14 @@ namespace OpenClassic.XboxAvatar
                         StringComparison.OrdinalIgnoreCase))
                 {
                     _global = ParseVector(parts);
+                    continue;
+                }
+
+                if (string.Equals(parts[0], "hands",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    _meshHands = string.Equals(parts[1], "mesh",
+                        StringComparison.OrdinalIgnoreCase);
                     continue;
                 }
 
@@ -424,6 +453,18 @@ namespace OpenClassic.XboxAvatar
                 "#     space hand           or      space avatar",
                 "",
                 "space hand",
+                "",
+                "# The first-person hand. This is the one real difference",
+                "# between the two views: third person draws the hand your",
+                "# avatar has, while first person throws it away and rebuilds",
+                "# the game's own hand to match its surface. Anything that",
+                "# looks wrong in first person but right in third comes from",
+                "# that rebuild.",
+                "#",
+                "#     hands carrier   rebuild the game's hand   (default)",
+                "#     hands mesh      draw your avatar's hand, as third person does",
+                "",
+                "hands carrier",
                 "",
                 "# 3. Per-item nudges, on top of the one above, for when one",
                 "# item still sits differently from the rest. The name is the",
@@ -1152,10 +1193,15 @@ namespace OpenClassic.XboxAvatar
 
                 int renderedBatches = 0;
                 int renderedTriangles = 0;
+                // "mesh" draws the avatar's own hand, the same geometry third
+                // person uses; "carrier" rebuilds ProxyBoy's hand against it.
+                bool meshHands = ItemTuning.MeshHands;
                 foreach (AvatarBatch batch in _asset.Batches)
                 {
-                    short[] indices = batch.MappedFirstPersonIndices;
-                    if (indices.Length < 3)
+                    short[] indices = meshHands
+                        ? batch.MappedFirstPersonHandIndices
+                        : batch.MappedFirstPersonIndices;
+                    if (indices == null || indices.Length < 3)
                     {
                         continue;
                     }
@@ -1197,7 +1243,9 @@ namespace OpenClassic.XboxAvatar
                 }
 
                 foreach (ProxyHandCarrierPart carrierPart in
-                    _firstPersonCarrier.Parts)
+                    meshHands
+                        ? new ProxyHandCarrierPart[0]
+                        : _firstPersonCarrier.Parts)
                 {
                     // The same triangles once per layer, as third person draws
                     // them: the base surface and then each overlay pass that
@@ -1333,6 +1381,9 @@ namespace OpenClassic.XboxAvatar
                         averageColor /= part.DrawVertices.Length;
                     }
                     carrierStatus +=
+                        "carrierUnmorphed=" + _firstPersonCarrier.UnmorphedVertices +
+                        "/" + _firstPersonCarrier.TotalVertices +
+                        Environment.NewLine +
                         "carrierPart" + partIndex + "=" +
                         part.Material.Name +
                         " triangles=" + (part.Indices.Length / 3) +
@@ -1928,6 +1979,15 @@ namespace OpenClassic.XboxAvatar
 
         internal ProxyHandCarrierPart[] Parts;
 
+        /// <summary>
+        /// How many carrier vertices could not be projected onto the avatar's
+        /// surface, out of how many were tried. A high proportion means the
+        /// hand on screen is largely the game's own shape wearing the avatar's
+        /// texture, which is what a torn-looking glove actually is.
+        /// </summary>
+        internal int UnmorphedVertices;
+        internal int TotalVertices;
+
         private ProxyHandCarrier(
             ProxyHandCarrierPart[] parts,
             Matrix[] inverseBindPose,
@@ -2054,6 +2114,8 @@ namespace OpenClassic.XboxAvatar
                 }
             }
 
+            int unmorphedVertices = 0;
+            int totalVertices = 0;
             int[] sourceIndices = ReadPartIndices(part);
             var selectedIndices = new List<int>();
             for (int triangle = 0;
@@ -2070,25 +2132,22 @@ namespace OpenClassic.XboxAvatar
                     throw new InvalidDataException(
                         "ProxyBoy body mesh contains an invalid hand index.");
                 }
+                byte side = sides[index0];
                 // Preserve both stock first-person hand branches.  Each
                 // carrier vertex retains ProxyBoy's original left/right wrist
                 // weights, so the support hand follows PropLeft while the
                 // trigger hand follows PropRight instead of being duplicated
                 // at the weapon anchor.
                 //
-                // Requiring all three vertices to agree punched holes in the
-                // hand: one vertex bound only to a bone with no avatar
-                // equivalent scores no wrist weight, and its whole triangle
-                // was discarded, which is the notch that appeared at the base
-                // of the thumb. A majority is enough to place the triangle,
-                // and the odd vertex out simply follows it - the two hands
-                // stay separate because a vertex claimed by the other hand
-                // still vetoes.
-                byte side = TriangleCarrierSide(
-                    sides[index0],
-                    sides[index1],
-                    sides[index2]);
-                if (side != 0)
+                // All three vertices have to agree. Accepting a majority and
+                // letting the odd vertex follow the triangle looked like a way
+                // to close the notch at the base of the thumb, but a vertex
+                // with no hand of its own is usually forearm: morphing it onto
+                // the hand surface tore a gloved hand apart. The notch is the
+                // lesser problem, and this is not the place to fix it.
+                if (side != 0 &&
+                    sides[index1] == side &&
+                    sides[index2] == side)
                 {
                     selectedIndices.Add(index0);
                     selectedIndices.Add(index1);
@@ -2138,7 +2197,9 @@ namespace OpenClassic.XboxAvatar
                     allVertices[index2],
                     side,
                     surface,
-                    avatarBoneByProxy);
+                    avatarBoneByProxy,
+                    ref unmorphedVertices,
+                    ref totalVertices);
             }
             if (builders.Count == 0)
             {
@@ -2152,10 +2213,13 @@ namespace OpenClassic.XboxAvatar
                 parts.Add(builder.Build());
             }
             var skinning = (SkinedAnimationData)model.Tag;
-            return new ProxyHandCarrier(
+            var carrier = new ProxyHandCarrier(
                 parts.ToArray(),
                 skinning.InverseBindPose,
                 avatarBoneByProxy);
+            carrier.UnmorphedVertices = unmorphedVertices;
+            carrier.TotalVertices = totalVertices;
+            return carrier;
         }
 
         internal void Skin(
@@ -2311,6 +2375,20 @@ namespace OpenClassic.XboxAvatar
             {
                 return best;
             }
+
+            // No glove triangle to project onto, but the hand is still gloved.
+            //
+            // Falling through to the base body here put bare skin on a handful
+            // of triangles - 60 of 789 on a black glove - and projected them
+            // onto body geometry the glove is covering, which is the detached
+            // skin-coloured fragments that appear to float above a gloved hand
+            // in first person. Stay on the garment: the nearest outer-hand
+            // batch is wrong by a few millimetres, the body is wrong by a whole
+            // material.
+            if (asset.OuterHandBatches.Count > 0)
+            {
+                return asset.OuterHandBatches[0];
+            }
             return asset.BaseBodyBatch ?? asset.BareHandShell;
         }
 
@@ -2354,23 +2432,69 @@ namespace OpenClassic.XboxAvatar
             CarrierSourceVertex vertex2,
             byte side,
             AvatarBatch surface,
-            int[] avatarBoneByProxy)
+            int[] avatarBoneByProxy,
+            ref int unmorphed,
+            ref int total)
         {
             CarrierSourceVertex[] vertices =
                 { vertex0, vertex1, vertex2 };
             for (int index = 0; index < vertices.Length; index++)
             {
-                CarrierSourceVertex vertex = vertices[index];
-                MorphCarrierVertex(
-                    ref vertex,
-                    side,
-                    surface,
-                    avatarBoneByProxy);
-                builder.Add(vertex);
+                if (!MorphCarrierVertex(
+                        ref vertices[index],
+                        side,
+                        surface,
+                        avatarBoneByProxy))
+                {
+                    unmorphed++;
+                }
+                total++;
+            }
+
+            UnwrapTriangleTextureCoordinates(vertices);
+
+            for (int index = 0; index < vertices.Length; index++)
+            {
+                builder.Add(vertices[index]);
             }
         }
 
-        private static void MorphCarrierVertex(
+        /// <summary>
+        /// Bring a triangle's three texture coordinates into the same tile.
+        ///
+        /// Xbox garment atlases address their islands with deliberately
+        /// out-of-range coordinates - this glove spans u=[-3.3,0.96] - and rely
+        /// on wrapping to reach them. The mesh's own triangles are authored so
+        /// that no triangle straddles the jump. The carrier is not that mesh:
+        /// it re-triangulates the surface with ProxyBoy's topology, so its
+        /// triangles do straddle, and one corner at u=-3.3 beside another at
+        /// u=0.9 sweeps four copies of the atlas across a single triangle.
+        /// That is the smeared, torn glove, and it happens in first person only
+        /// because third person draws the original triangles.
+        ///
+        /// Shifting a corner by a whole tile samples the identical texel under
+        /// wrapping, so this changes nothing that was already consistent and
+        /// removes the sweep from everything that was not.
+        /// </summary>
+        private static void UnwrapTriangleTextureCoordinates(
+            CarrierSourceVertex[] vertices)
+        {
+            Vector2 reference = vertices[0].TextureCoordinate;
+            for (int index = 1; index < vertices.Length; index++)
+            {
+                Vector2 coordinate = vertices[index].TextureCoordinate;
+                coordinate.X -= (float)Math.Round(coordinate.X - reference.X);
+                coordinate.Y -= (float)Math.Round(coordinate.Y - reference.Y);
+                vertices[index].TextureCoordinate = coordinate;
+            }
+        }
+
+        /// <summary>
+        /// Move one carrier vertex onto the avatar's surface. Returns whether
+        /// it landed; a vertex that did not is reported so a hand that is
+        /// mostly unprojected can be recognised rather than guessed at.
+        /// </summary>
+        private static bool MorphCarrierVertex(
             ref CarrierSourceVertex vertex,
             byte side,
             AvatarBatch surface,
@@ -2387,15 +2511,33 @@ namespace OpenClassic.XboxAvatar
                 side,
                 region,
                 out point);
-            if (!found || point.Distance > MaximumSurfaceProjection)
+            if (!found)
             {
-                return;
+                return false;
+            }
+
+            // Too far to move the vertex onto, but its texture coordinate must
+            // still come from the avatar.
+            //
+            // Leaving the vertex entirely alone kept ProxyBoy's own UV, which
+            // then addressed the avatar's atlas - a coordinate meaning one
+            // thing in the game's hand texture and something unrelated in a
+            // glove's. Neighbouring vertices that did project sample correctly,
+            // so a single surface ends up half right and half arbitrary, which
+            // is the torn, patchy look a gloved hand has in first person and
+            // never in third.
+            if (point.Distance > MaximumSurfaceProjection)
+            {
+                vertex.TextureCoordinate = point.TextureCoordinate;
+                vertex.Color = point.Color;
+                return false;
             }
 
             vertex.Position = ToProxyPosition(point.Position);
             vertex.Normal = ToProxyDirection(point.Normal);
             vertex.TextureCoordinate = point.TextureCoordinate;
             vertex.Color = point.Color;
+            return true;
         }
 
         private static Vector3 ToXboxExportPosition(Vector3 value)
@@ -2665,38 +2807,6 @@ namespace OpenClassic.XboxAvatar
             float w = vc * denominator;
             barycentric = new Vector3(1f - v - w, v, w);
             return a + ab * v + ac * w;
-        }
-
-        /// <summary>
-        /// Which hand a carrier triangle belongs to, or 0 for none.
-        ///
-        /// Two vertices agreeing is enough. A single unassigned vertex follows
-        /// the other two rather than costing the triangle, but a vertex
-        /// claimed by the opposite hand still rules the triangle out, so the
-        /// two hands never merge across the gap between them.
-        /// </summary>
-        private static byte TriangleCarrierSide(byte first, byte second, byte third)
-        {
-            byte candidate = first != 0 ? first : (second != 0 ? second : third);
-            if (candidate == 0)
-            {
-                return 0;
-            }
-            int agreeing = 0;
-            byte[] corners = { first, second, third };
-            foreach (byte corner in corners)
-            {
-                if (corner == candidate)
-                {
-                    agreeing++;
-                }
-                else if (corner != 0)
-                {
-                    // Claimed by the other hand.
-                    return 0;
-                }
-            }
-            return agreeing >= 2 ? candidate : (byte)0;
         }
 
         private static float CarrierHandWeight(
@@ -3073,6 +3183,14 @@ namespace OpenClassic.XboxAvatar
                         asset.AddOuterHandBatch(batch);
                     }
 
+                    // Keep the avatar's own arm and hand geometry, entire, for
+                    // the "hands mesh" mode: the same triangles third person
+                    // draws, so first person can show the hand the avatar
+                    // actually has instead of a re-projection of ProxyBoy's.
+                    batch.BuildMappedFirstPersonGeometry(false, false);
+                    batch.MappedFirstPersonHandIndices =
+                        batch.MappedFirstPersonIndices;
+
                     // First person uses the continuous ProxyBoy hand topology as
                     // a carrier, morphed to the exported Xbox surface. Suppress
                     // every exported hand layer here so duplicate palm/finger
@@ -3172,12 +3290,45 @@ namespace OpenClassic.XboxAvatar
                     candidate.Name != null &&
                     candidate.Name.StartsWith(
                         overlayPrefix,
-                        StringComparison.OrdinalIgnoreCase))
+                        StringComparison.OrdinalIgnoreCase) &&
+                    SharesTextureMapping(batch, candidate))
                 {
                     layers.Add(candidate);
                 }
             }
             return layers.ToArray();
+        }
+
+        /// <summary>
+        /// Whether two layers address their textures identically.
+        ///
+        /// The carrier samples one set of UVs, taken from the layer it was
+        /// morphed against, so an extra pass is only meaningful when it uses
+        /// those same UVs. A body's overlays do; an outfit's do not - its base
+        /// spans u=[-0.994,0.997] while its overlays span u=[0,1] - and
+        /// pushing the base's UVs through an overlay's atlas samples whatever
+        /// happens to be there. Check rather than assume.
+        /// </summary>
+        private static bool SharesTextureMapping(
+            AvatarBatch first,
+            AvatarBatch second)
+        {
+            if (first.DrawVertices == null || second.DrawVertices == null ||
+                first.DrawVertices.Length != second.DrawVertices.Length)
+            {
+                return false;
+            }
+            for (int index = 0; index < first.DrawVertices.Length; index++)
+            {
+                Vector2 a = first.DrawVertices[index].TextureCoordinate;
+                Vector2 b = second.DrawVertices[index].TextureCoordinate;
+                if (Math.Abs(a.X - b.X) > 0.0001f ||
+                    Math.Abs(a.Y - b.Y) > 0.0001f)
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         private static Vector3[] BuildCumulativeShapeScales(
@@ -3305,6 +3456,16 @@ namespace OpenClassic.XboxAvatar
         internal short[] ThirdPersonIndices;
         internal short[] FirstPersonIndices;
         internal short[] MappedFirstPersonIndices;
+
+        /// <summary>
+        /// The avatar's own arm geometry with nothing removed, hands included.
+        ///
+        /// First person normally throws the exported hand away and re-projects
+        /// the stock ProxyBoy hand onto its surface instead. This is the same
+        /// geometry third person draws, kept so that choice can be reversed at
+        /// runtime and the two compared.
+        /// </summary>
+        internal short[] MappedFirstPersonHandIndices;
         internal byte[] FirstPersonSides;
         internal bool[] FirstPersonUsed;
         internal byte[][] MappedBindings;
