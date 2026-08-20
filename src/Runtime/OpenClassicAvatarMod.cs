@@ -1199,27 +1199,43 @@ namespace OpenClassic.XboxAvatar
                 foreach (ProxyHandCarrierPart carrierPart in
                     _firstPersonCarrier.Parts)
                 {
-                    AvatarBatch carrierMaterial = carrierPart.Material;
-                    _effect.VertexColorEnabled = carrierPart.UseVertexColor;
-                    _effect.DiffuseColor = carrierMaterial.DiffuseColor;
-                    _effect.TextureEnabled =
-                        carrierPart.UseTexture &&
-                        carrierMaterial.Texture != null;
-                    _effect.Texture = carrierMaterial.Texture;
-                    foreach (EffectPass pass in _effect.CurrentTechnique.Passes)
+                    // The same triangles once per layer, as third person draws
+                    // them: the base surface and then each overlay pass that
+                    // tints it. Drawing only the first layer left the hand on
+                    // the untinted base texture.
+                    foreach (AvatarBatch carrierMaterial in carrierPart.Layers)
                     {
-                        pass.Apply();
-                        device.DrawUserIndexedPrimitives(
-                            PrimitiveType.TriangleList,
-                            carrierPart.DrawVertices,
-                            0,
-                            carrierPart.DrawVertices.Length,
-                            carrierPart.Indices,
-                            0,
-                            carrierPart.Indices.Length / 3);
+                        if (carrierMaterial == null)
+                        {
+                            continue;
+                        }
+                        _effect.VertexColorEnabled = carrierPart.UseVertexColor;
+                        _effect.DiffuseColor = carrierMaterial.DiffuseColor;
+                        _effect.TextureEnabled =
+                            carrierPart.UseTexture &&
+                            carrierMaterial.Texture != null;
+                        _effect.Texture = carrierMaterial.Texture;
+                        // Same addressing rule third person uses, rather than
+                        // inheriting whatever the last batch happened to set.
+                        device.SamplerStates[0] =
+                            carrierMaterial.FaceTextureUsage >= 0
+                                ? SamplerState.LinearClamp
+                                : SamplerState.LinearWrap;
+                        foreach (EffectPass pass in _effect.CurrentTechnique.Passes)
+                        {
+                            pass.Apply();
+                            device.DrawUserIndexedPrimitives(
+                                PrimitiveType.TriangleList,
+                                carrierPart.DrawVertices,
+                                0,
+                                carrierPart.DrawVertices.Length,
+                                carrierPart.Indices,
+                                0,
+                                carrierPart.Indices.Length / 3);
+                        }
+                        renderedBatches++;
+                        renderedTriangles += carrierPart.Indices.Length / 3;
                     }
-                    renderedBatches++;
-                    renderedTriangles += carrierPart.Indices.Length / 3;
                 }
 
                 if (!_firstPersonLogged)
@@ -2054,15 +2070,25 @@ namespace OpenClassic.XboxAvatar
                     throw new InvalidDataException(
                         "ProxyBoy body mesh contains an invalid hand index.");
                 }
-                byte side = sides[index0];
                 // Preserve both stock first-person hand branches.  Each
                 // carrier vertex retains ProxyBoy's original left/right wrist
                 // weights, so the support hand follows PropLeft while the
                 // trigger hand follows PropRight instead of being duplicated
                 // at the weapon anchor.
-                if (side != 0 &&
-                    sides[index1] == side &&
-                    sides[index2] == side)
+                //
+                // Requiring all three vertices to agree punched holes in the
+                // hand: one vertex bound only to a bone with no avatar
+                // equivalent scores no wrist weight, and its whole triangle
+                // was discarded, which is the notch that appeared at the base
+                // of the thumb. A majority is enough to place the triangle,
+                // and the odd vertex out simply follows it - the two hands
+                // stay separate because a vertex claimed by the other hand
+                // still vetoes.
+                byte side = TriangleCarrierSide(
+                    sides[index0],
+                    sides[index1],
+                    sides[index2]);
+                if (side != 0)
                 {
                     selectedIndices.Add(index0);
                     selectedIndices.Add(index1);
@@ -2099,7 +2125,10 @@ namespace OpenClassic.XboxAvatar
                 if (!builders.TryGetValue(material, out builder))
                 {
                     bool outer = asset.IsOuterHandBatch(material);
-                    builder = new CarrierPartBuilder(material, outer);
+                    builder = new CarrierPartBuilder(
+                        material,
+                        asset.MaterialLayersFor(material),
+                        outer);
                     builders.Add(material, builder);
                 }
                 AddCarrierTriangle(
@@ -2427,11 +2456,16 @@ namespace OpenClassic.XboxAvatar
                 new List<AvatarDrawVertex>();
             private readonly List<short> _indices = new List<short>();
             private readonly AvatarBatch _material;
+            private readonly AvatarBatch[] _layers;
             private readonly bool _outer;
 
-            internal CarrierPartBuilder(AvatarBatch material, bool outer)
+            internal CarrierPartBuilder(
+                AvatarBatch material,
+                AvatarBatch[] layers,
+                bool outer)
             {
                 _material = material;
+                _layers = layers;
                 _outer = outer;
             }
 
@@ -2453,14 +2487,29 @@ namespace OpenClassic.XboxAvatar
 
             internal ProxyHandCarrierPart Build()
             {
+                // Draw the hand the way third person draws the same surface:
+                // its texture and its vertex colours, not a flat diffuse.
+                //
+                // Every batch in an Xbox avatar has a white diffuse - the skin
+                // tone lives in the texture and the vertex colours - so a bare
+                // hand, which is not an outfit glove and so had both switched
+                // off, could only ever come out white. An avatar whose outfit
+                // includes gloves was unaffected, which is why this went
+                // unnoticed until a bare-handed outfit turned up.
+                //
+                // A bare-hand shell is still the exception the third-person
+                // path makes it: its vertex colours are greyscale shader masks
+                // rather than skin, so they stay suppressed.
+                bool maskColours = _material.IsBareHandShell;
                 return new ProxyHandCarrierPart(
                     _sourceVertices.ToArray(),
                     _drawVertices.ToArray(),
                     _indices.ToArray(),
                     _material,
-                    _outer && _material.TexturePng != null &&
+                    _layers,
+                    _material.TexturePng != null &&
                         _material.TexturePng.Length > 0,
-                    _outer);
+                    !maskColours);
             }
         }
 
@@ -2616,6 +2665,38 @@ namespace OpenClassic.XboxAvatar
             float w = vc * denominator;
             barycentric = new Vector3(1f - v - w, v, w);
             return a + ab * v + ac * w;
+        }
+
+        /// <summary>
+        /// Which hand a carrier triangle belongs to, or 0 for none.
+        ///
+        /// Two vertices agreeing is enough. A single unassigned vertex follows
+        /// the other two rather than costing the triangle, but a vertex
+        /// claimed by the opposite hand still rules the triangle out, so the
+        /// two hands never merge across the gap between them.
+        /// </summary>
+        private static byte TriangleCarrierSide(byte first, byte second, byte third)
+        {
+            byte candidate = first != 0 ? first : (second != 0 ? second : third);
+            if (candidate == 0)
+            {
+                return 0;
+            }
+            int agreeing = 0;
+            byte[] corners = { first, second, third };
+            foreach (byte corner in corners)
+            {
+                if (corner == candidate)
+                {
+                    agreeing++;
+                }
+                else if (corner != 0)
+                {
+                    // Claimed by the other hand.
+                    return 0;
+                }
+            }
+            return agreeing >= 2 ? candidate : (byte)0;
         }
 
         private static float CarrierHandWeight(
@@ -2774,6 +2855,7 @@ namespace OpenClassic.XboxAvatar
         internal AvatarDrawVertex[] DrawVertices;
         internal short[] Indices;
         internal AvatarBatch Material;
+        internal AvatarBatch[] Layers;
         internal bool UseTexture;
         internal bool UseVertexColor;
 
@@ -2782,6 +2864,7 @@ namespace OpenClassic.XboxAvatar
             AvatarDrawVertex[] drawVertices,
             short[] indices,
             AvatarBatch material,
+            AvatarBatch[] layers,
             bool useTexture,
             bool useVertexColor)
         {
@@ -2789,6 +2872,9 @@ namespace OpenClassic.XboxAvatar
             DrawVertices = drawVertices;
             Indices = indices;
             Material = material;
+            Layers = layers != null && layers.Length > 0
+                ? layers
+                : new[] { material };
             UseTexture = useTexture;
             UseVertexColor = useVertexColor;
         }
@@ -3058,6 +3144,40 @@ namespace OpenClassic.XboxAvatar
         internal bool IsOuterHandBatch(AvatarBatch batch)
         {
             return batch != null && OuterHandBatches.Contains(batch);
+        }
+
+        /// <summary>
+        /// A surface and the overlay passes painted on top of it, in draw
+        /// order.
+        ///
+        /// An Xbox surface is not one batch but a stack: "…:model:0" followed
+        /// by "…:model:0:material-overlay-palette" and "…-decal", the same
+        /// triangles with the same UVs drawn again through another texture.
+        /// Third person draws the whole stack, which is where the colour comes
+        /// from. First person drew only the first layer, so its hand was the
+        /// untinted base.
+        /// </summary>
+        internal AvatarBatch[] MaterialLayersFor(AvatarBatch batch)
+        {
+            if (batch == null || Batches == null)
+            {
+                return new AvatarBatch[0];
+            }
+            string overlayPrefix = batch.Name + ":material-overlay";
+            var layers = new List<AvatarBatch> { batch };
+            foreach (AvatarBatch candidate in Batches)
+            {
+                if (candidate != null &&
+                    candidate != batch &&
+                    candidate.Name != null &&
+                    candidate.Name.StartsWith(
+                        overlayPrefix,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    layers.Add(candidate);
+                }
+            }
+            return layers.ToArray();
         }
 
         private static Vector3[] BuildCumulativeShapeScales(

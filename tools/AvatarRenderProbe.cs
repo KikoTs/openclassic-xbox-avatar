@@ -249,12 +249,13 @@ internal static class AvatarRenderProbe
                 Clamp8((int)(diffuseColour.Y * 255)),
                 Clamp8((int)(diffuseColour.Z * 255)));
             Console.WriteLine(string.Format(
-                "batch {0,-34} tris={1,5} tex={2,-9} u=[{3,7:F3},{4,7:F3}] v=[{5,7:F3},{6,7:F3}] faceUsage={7} frame={8}",
+                "batch {0,-58} tris={1,5} tex={2,-9} u=[{3,7:F3},{4,7:F3}] v=[{5,7:F3},{6,7:F3}] faceUsage={7} frame={8} diffuse=[{9:F3},{10:F3},{11:F3}]",
                 name,
                 indices.Length / 3,
                 texture == null ? "NONE" : texture.Width + "x" + texture.Height,
                 uMin, uMax, vMin, vMax,
-                faceUsage, faceFrame));
+                faceUsage, faceFrame,
+                diffuseColour.X, diffuseColour.Y, diffuseColour.Z));
 
             for (int i = 0; i + 2 < indices.Length; i += 3)
             {
