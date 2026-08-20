@@ -102,23 +102,46 @@ namespace OpenClassic.XboxAvatar
         private static Placement _mode = Placement.Hand;
         private static Vector3 _global;
         private static bool _handSpace = true;
-        private static bool _meshHands;
-
         /// <summary>
-        /// Whether first person draws the avatar's own hand mesh instead of
-        /// re-projecting the stock ProxyBoy hand onto its surface.
+        /// How the first-person hand is built.
         ///
         /// This is the one real difference between the two views: third person
-        /// draws the hand the avatar has, first person rebuilds a different
-        /// hand to match it. Everything that has looked wrong in first person
-        /// and right in third comes from that rebuild.
+        /// draws the hand the avatar has, first person builds a different hand
+        /// to match it, because the hand has to be posed by the game's own
+        /// first-person animation to hold an item. Everything that has looked
+        /// wrong in first person and right in third comes from that rebuild.
         /// </summary>
-        internal static bool MeshHands
+        internal enum HandBuild
+        {
+            /// <summary>
+            /// The game's hand, every vertex moved onto the nearest point of
+            /// the avatar's surface. Follows the avatar's shape, but nearest
+            /// point is not a continuous mapping, so neighbouring vertices can
+            /// land on opposite sides of a finger and tear the mesh.
+            /// </summary>
+            Carrier,
+            /// <summary>
+            /// The game's hand, unmoved, in the avatar's colour. Cannot tear,
+            /// because no vertex moves; the shape is the game's rather than
+            /// the avatar's.
+            /// </summary>
+            Tinted,
+            /// <summary>
+            /// The avatar's own hand mesh. Correct shape and texture, but its
+            /// fingers come apart in the item-holding pose - which is why the
+            /// carrier exists. Kept for comparison.
+            /// </summary>
+            Mesh,
+        }
+
+        private static HandBuild _hands = HandBuild.Carrier;
+
+        internal static HandBuild Hands
         {
             get
             {
                 Refresh();
-                return _meshHands;
+                return _hands;
             }
         }
         private static DateTime _stampUtc;
@@ -166,7 +189,7 @@ namespace OpenClassic.XboxAvatar
             Refresh();
             var text = new System.Text.StringBuilder();
             text.Append("mode=").Append(_mode.ToString().ToLowerInvariant());
-            text.Append(" hands=").Append(_meshHands ? "mesh" : "carrier");
+            text.Append(" hands=").Append(_hands.ToString().ToLowerInvariant());
             text.Append(" space=").Append(_handSpace ? "hand" : "avatar");
             text.Append(" offset=").Append(_global);
             foreach (KeyValuePair<string, Vector3> item in Items)
@@ -278,7 +301,7 @@ namespace OpenClassic.XboxAvatar
             _mode = Placement.Hand;
             _global = Vector3.Zero;
             _handSpace = true;
-            _meshHands = false;
+            _hands = HandBuild.Carrier;
             foreach (string raw in lines)
             {
                 string line = raw.Trim();
@@ -326,8 +349,15 @@ namespace OpenClassic.XboxAvatar
                 if (string.Equals(parts[0], "hands",
                         StringComparison.OrdinalIgnoreCase))
                 {
-                    _meshHands = string.Equals(parts[1], "mesh",
-                        StringComparison.OrdinalIgnoreCase);
+                    try
+                    {
+                        _hands = (HandBuild)Enum.Parse(
+                            typeof(HandBuild), parts[1], true);
+                    }
+                    catch
+                    {
+                        // Unrecognised name keeps the current build.
+                    }
                     continue;
                 }
 
@@ -573,6 +603,7 @@ namespace OpenClassic.XboxAvatar
         private bool _failed;
         private bool _firstPersonFailed;
         private bool _firstPersonLogged;
+        private string _firstPersonBatches = string.Empty;
 
         public ImportedAvatarModelEntity(Model fallbackModel, Avatar avatar, string assetPath)
             : base(fallbackModel)
@@ -1195,7 +1226,8 @@ namespace OpenClassic.XboxAvatar
                 int renderedTriangles = 0;
                 // "mesh" draws the avatar's own hand, the same geometry third
                 // person uses; "carrier" rebuilds ProxyBoy's hand against it.
-                bool meshHands = ItemTuning.MeshHands;
+                ItemTuning.HandBuild hands = ItemTuning.Hands;
+                bool meshHands = hands == ItemTuning.HandBuild.Mesh;
                 foreach (AvatarBatch batch in _asset.Batches)
                 {
                     short[] indices = meshHands
@@ -1240,6 +1272,17 @@ namespace OpenClassic.XboxAvatar
                     }
                     renderedBatches++;
                     renderedTriangles += indices.Length / 3;
+                    if (!_firstPersonLogged)
+                    {
+                        // Name every batch first person actually puts on
+                        // screen. The hand is only one of them, and a stray
+                        // slab of garment near the hand looks exactly like a
+                        // broken hand until the list says otherwise.
+                        _firstPersonBatches +=
+                            "fpBatch=" + batch.Name +
+                            " triangles=" + (indices.Length / 3) +
+                            Environment.NewLine;
+                    }
                 }
 
                 foreach (ProxyHandCarrierPart carrierPart in
@@ -1257,12 +1300,31 @@ namespace OpenClassic.XboxAvatar
                         {
                             continue;
                         }
-                        _effect.VertexColorEnabled = carrierPart.UseVertexColor;
-                        _effect.DiffuseColor = carrierMaterial.DiffuseColor;
-                        _effect.TextureEnabled =
-                            carrierPart.UseTexture &&
-                            carrierMaterial.Texture != null;
-                        _effect.Texture = carrierMaterial.Texture;
+                        if (hands == ItemTuning.HandBuild.Tinted)
+                        {
+                            // The game's hand shape carries the game's own UVs,
+                            // which mean nothing in the avatar's atlas, so the
+                            // avatar's contribution here is its colour rather
+                            // than its texture. One flat pass, and the overlay
+                            // layers would only repaint the same thing.
+                            if (carrierMaterial != carrierPart.Material)
+                            {
+                                continue;
+                            }
+                            _effect.VertexColorEnabled = false;
+                            _effect.TextureEnabled = false;
+                            _effect.DiffuseColor =
+                                carrierMaterial.AverageColor();
+                        }
+                        else
+                        {
+                            _effect.VertexColorEnabled = carrierPart.UseVertexColor;
+                            _effect.DiffuseColor = carrierMaterial.DiffuseColor;
+                            _effect.TextureEnabled =
+                                carrierPart.UseTexture &&
+                                carrierMaterial.Texture != null;
+                            _effect.Texture = carrierMaterial.Texture;
+                        }
                         // Same addressing rule third person uses, rather than
                         // inheriting whatever the last batch happened to set.
                         device.SamplerStates[0] =
@@ -1381,8 +1443,11 @@ namespace OpenClassic.XboxAvatar
                         averageColor /= part.DrawVertices.Length;
                     }
                     carrierStatus +=
+                        _firstPersonBatches +
                         "carrierUnmorphed=" + _firstPersonCarrier.UnmorphedVertices +
                         "/" + _firstPersonCarrier.TotalVertices +
+                        " carrierReverted=" + _firstPersonCarrier.RevertedVertices +
+                        " largestShapeScale=" + _firstPersonCarrier.LargestShapeScale.ToString("F3") +
                         Environment.NewLine +
                         "carrierPart" + partIndex + "=" +
                         part.Material.Name +
@@ -1972,6 +2037,12 @@ namespace OpenClassic.XboxAvatar
     {
         private const float CarrierCuffRadius = 0.11f;
         private const float MaximumSurfaceProjection = 0.04f;
+
+        /// <summary>
+        /// How many times the typical displacement a vertex may move before
+        /// its projection is treated as a mistake rather than a fit.
+        /// </summary>
+        private const float OutlierDisplacementFactor = 4f;
         private const float CarrierModelScale = 100f;
 
         private readonly Matrix[] _inverseBindPose;
@@ -1987,6 +2058,16 @@ namespace OpenClassic.XboxAvatar
         /// </summary>
         internal int UnmorphedVertices;
         internal int TotalVertices;
+
+        /// <summary>
+        /// How many projections were rejected as outliers and put back on the
+        /// game's own hand. A large number means the avatar's hand is far
+        /// enough from ProxyBoy's that most of the projection is guesswork.
+        /// </summary>
+        internal int RevertedVertices;
+
+        /// <summary>Largest per-bone shape scale the skinning applies.</summary>
+        internal float LargestShapeScale;
 
         private ProxyHandCarrier(
             ProxyHandCarrierPart[] parts,
@@ -2219,7 +2300,74 @@ namespace OpenClassic.XboxAvatar
                 avatarBoneByProxy);
             carrier.UnmorphedVertices = unmorphedVertices;
             carrier.TotalVertices = totalVertices;
+            carrier.RevertedVertices = RevertProjectionOutliers(carrier.Parts);
             return carrier;
+        }
+
+        /// <summary>
+        /// Undo the projections that disagree with everything around them.
+        ///
+        /// Nearest point is not a continuous mapping. Two vertices that are
+        /// neighbours on the game's hand can land on opposite sides of a
+        /// finger, and the triangle between them is then stretched across the
+        /// gap - the spikes and flat wedges that shoot out of a gloved hand.
+        /// The projection is only trustworthy where it agrees with its
+        /// surroundings, so measure how far each vertex moved, and put back
+        /// any that moved far more than the rest did. A vertex returned to the
+        /// game's own hand is no worse placed than its neighbours; a vertex
+        /// left on the wrong finger drags a triangle across the whole hand.
+        ///
+        /// Uses the median rather than the mean: a handful of very large
+        /// displacements is exactly the case being detected, and they would
+        /// drag a mean up far enough to hide themselves.
+        /// </summary>
+        private static int RevertProjectionOutliers(ProxyHandCarrierPart[] parts)
+        {
+            var displacements = new List<float>();
+            foreach (ProxyHandCarrierPart part in parts)
+            {
+                foreach (CarrierSourceVertex vertex in part.SourceVertices)
+                {
+                    displacements.Add(Vector3.Distance(
+                        vertex.Position,
+                        vertex.StockPosition));
+                }
+            }
+            if (displacements.Count == 0)
+            {
+                return 0;
+            }
+            displacements.Sort();
+            float median = displacements[displacements.Count / 2];
+
+            // A vertex is an outlier when it moved several times as far as a
+            // typical one. The floor keeps the rule quiet on a hand that
+            // matches closely, where the median is near zero and any small
+            // variation would otherwise read as a multiple of it.
+            float limit = Math.Max(median * OutlierDisplacementFactor,
+                MaximumSurfaceProjection * 0.25f);
+
+            int reverted = 0;
+            foreach (ProxyHandCarrierPart part in parts)
+            {
+                for (int index = 0; index < part.SourceVertices.Length; index++)
+                {
+                    CarrierSourceVertex vertex = part.SourceVertices[index];
+                    if (Vector3.Distance(vertex.Position, vertex.StockPosition)
+                        <= limit)
+                    {
+                        continue;
+                    }
+                    // Keep the texture coordinate: it came from the avatar and
+                    // is what makes the hand look like this avatar's. Only the
+                    // position was untrustworthy.
+                    vertex.Position = vertex.StockPosition;
+                    vertex.Normal = vertex.StockNormal;
+                    part.SourceVertices[index] = vertex;
+                    reverted++;
+                }
+            }
+            return reverted;
         }
 
         internal void Skin(
@@ -2238,17 +2386,31 @@ namespace OpenClassic.XboxAvatar
                     avatarBone < avatarShapeScales.Length
                         ? avatarShapeScales[avatarBone]
                         : Vector3.One;
+                float largest = Math.Max(shape.X, Math.Max(shape.Y, shape.Z));
+                if (largest > LargestShapeScale)
+                {
+                    LargestShapeScale = largest;
+                }
                 transforms[proxyBone] =
                     _inverseBindPose[proxyBone] *
                     Matrix.CreateScale(shape) *
                     worldBoneTransforms[proxyBone];
             }
 
+            // "tinted" skins the game's own untouched hand, so nothing can be
+            // torn by a projection; only the colour comes from the avatar.
+            bool stockShape = ItemTuning.Hands == ItemTuning.HandBuild.Tinted;
+
             foreach (ProxyHandCarrierPart part in Parts)
             {
                 for (int index = 0; index < part.SourceVertices.Length; index++)
                 {
                     CarrierSourceVertex source = part.SourceVertices[index];
+                    if (stockShape)
+                    {
+                        source.Position = source.StockPosition;
+                        source.Normal = source.StockNormal;
+                    }
                     Vector3 position = Vector3.Zero;
                     Vector3 normal = Vector3.Zero;
                     float total = 0f;
@@ -2438,17 +2600,53 @@ namespace OpenClassic.XboxAvatar
         {
             CarrierSourceVertex[] vertices =
                 { vertex0, vertex1, vertex2 };
+            var moved = new bool[vertices.Length];
+            Vector3 shift = Vector3.Zero;
+            int shifted = 0;
             for (int index = 0; index < vertices.Length; index++)
             {
-                if (!MorphCarrierVertex(
-                        ref vertices[index],
-                        side,
-                        surface,
-                        avatarBoneByProxy))
+                vertices[index].StockPosition = vertices[index].Position;
+                vertices[index].StockNormal = vertices[index].Normal;
+                moved[index] = MorphCarrierVertex(
+                    ref vertices[index],
+                    side,
+                    surface,
+                    avatarBoneByProxy);
+                if (moved[index])
+                {
+                    shift += vertices[index].Position -
+                        vertices[index].StockPosition;
+                    shifted++;
+                }
+                else
                 {
                     unmorphed++;
                 }
                 total++;
+            }
+
+            // Carry a corner that could not be projected along with the ones
+            // that could.
+            //
+            // A vertex left exactly where the game's hand put it, between two
+            // that moved onto the avatar's, is a crease - and with 108 of 2367
+            // vertices in that state there are creases all over the hand. None
+            // is far enough to look like a spike by itself, which is why no
+            // measure of displacement finds them: the surface is simply being
+            // pulled in two directions at once. Moving a stranded corner by as
+            // much as its neighbours moved keeps the triangle flat. It is not
+            // where the avatar's surface is, but it is continuous with the
+            // vertices that are, and continuity is the thing that was lost.
+            if (shifted > 0 && shifted < vertices.Length)
+            {
+                shift /= shifted;
+                for (int index = 0; index < vertices.Length; index++)
+                {
+                    if (!moved[index])
+                    {
+                        vertices[index].Position += shift;
+                    }
+                }
             }
 
             UnwrapTriangleTextureCoordinates(vertices);
@@ -2947,6 +3145,14 @@ namespace OpenClassic.XboxAvatar
             internal Color Color;
             internal byte[] Bindings;
             internal float[] Weights;
+
+            /// <summary>
+            /// Where this vertex sat on the game's own hand before being
+            /// projected onto the avatar, so a projection that proves to be an
+            /// outlier can be undone and the untouched hand can be drawn.
+            /// </summary>
+            internal Vector3 StockPosition;
+            internal Vector3 StockNormal;
         }
 
         private struct SurfacePoint
@@ -3468,6 +3674,25 @@ namespace OpenClassic.XboxAvatar
         internal short[] MappedFirstPersonHandIndices;
         internal byte[] FirstPersonSides;
         internal bool[] FirstPersonUsed;
+
+        /// <summary>
+        /// Each vertex's distance to the nearer wrist in bind space. Says where
+        /// a vertex is rather than how it was rigged, which is the only way to
+        /// find a combined outfit's glove: it is bound to arm bones, so no
+        /// weight test can tell it apart from the sleeve it shares a model
+        /// with.
+        /// </summary>
+        internal float[] WristDistance;
+
+        /// <summary>
+        /// How far from the wrist the first-person carrier reaches. Anything
+        /// inside this the carrier draws, so the mesh must not: the two have to
+        /// partition the hand between them or they overlap, and the mesh's half
+        /// is posed by bones first person does not use.
+        ///
+        /// Matches ProxyHandCarrier's own cuff radius deliberately.
+        /// </summary>
+        internal const float CarrierHandRadius = 0.11f;
         internal byte[][] MappedBindings;
         internal byte[][] MappedWeights;
         internal Vector3 DiffuseColor;
@@ -3477,6 +3702,64 @@ namespace OpenClassic.XboxAvatar
         internal int ShaderId;
         internal byte PaletteMask;
         internal Vector4[] Palette;
+        private Vector3 _averageColor;
+        private bool _averageColorKnown;
+
+        /// <summary>
+        /// One colour standing in for this material's whole texture, for the
+        /// hand build that draws the game's own shape rather than the avatar's:
+        /// that shape carries the game's UVs, which address nothing meaningful
+        /// in the avatar's atlas, so a colour is the only part of the material
+        /// that can be carried across.
+        ///
+        /// Fully transparent texels are skipped - a garment atlas is mostly
+        /// empty space, and averaging that in would wash every glove out
+        /// towards the same pale grey.
+        /// </summary>
+        internal Vector3 AverageColor()
+        {
+            if (_averageColorKnown)
+            {
+                return _averageColor;
+            }
+            _averageColorKnown = true;
+            _averageColor = DiffuseColor;
+            try
+            {
+                if (Texture == null)
+                {
+                    return _averageColor;
+                }
+                var texels = new Color[Texture.Width * Texture.Height];
+                Texture.GetData(texels);
+                float red = 0f, green = 0f, blue = 0f;
+                int counted = 0;
+                foreach (Color texel in texels)
+                {
+                    if (texel.A < 8)
+                    {
+                        continue;
+                    }
+                    red += texel.R;
+                    green += texel.G;
+                    blue += texel.B;
+                    counted++;
+                }
+                if (counted > 0)
+                {
+                    _averageColor = new Vector3(
+                        red / counted / 255f,
+                        green / counted / 255f,
+                        blue / counted / 255f);
+                }
+            }
+            catch
+            {
+                // Keep the diffuse colour if the texture cannot be read.
+            }
+            return _averageColor;
+        }
+
         internal bool IsBaseBody;
         internal bool IsOverlayLayer;
         internal bool IsHandComponent;
@@ -3809,10 +4092,35 @@ namespace OpenClassic.XboxAvatar
                         ? (int)AvatarBone.WristLeft
                         : (int)AvatarBone.WristRight;
                     const float completeHandWeight = 0.15f;
+                    // Any vertex in the hand, not all three.
+                    //
+                    // The carrier supplies the whole hand here, so this mesh's
+                    // own hand triangles have to go. Requiring all three
+                    // vertices kept every triangle that straddled the wrist -
+                    // two corners in the hand, one in the forearm - and those
+                    // are still posed by hand bones, which first person does
+                    // not pose the way this mesh expects. They came out as
+                    // long flat slabs reaching across the hand, and on a
+                    // combined outfit, where sleeve and glove are one model,
+                    // there are a lot of them. The carrier covers the wrist,
+                    // so nothing is left uncovered by dropping them.
+                    //
+                    // Skin weights alone cannot find it. A combined outfit
+                    // binds its glove to arm bones rather than to the wrist,
+                    // so the whole glove scores no wrist weight and survived
+                    // every weight-based test - the outfit kept all 306 of its
+                    // first-person triangles while the base body dropped 32.
+                    // BuildFirstPersonGeometry has already worked out which
+                    // vertices sit inside the hand volume, by position rather
+                    // than by binding, and that answer does not care how the
+                    // garment was rigged.
                     bool duplicateHandTriangle =
-                        HandWeight(SourceVertices[(ushort)index0], wristBone) >= completeHandWeight &&
-                        HandWeight(SourceVertices[(ushort)index1], wristBone) >= completeHandWeight &&
-                        HandWeight(SourceVertices[(ushort)index2], wristBone) >= completeHandWeight;
+                        HandWeight(SourceVertices[(ushort)index0], wristBone) >= completeHandWeight ||
+                        HandWeight(SourceVertices[(ushort)index1], wristBone) >= completeHandWeight ||
+                        HandWeight(SourceVertices[(ushort)index2], wristBone) >= completeHandWeight ||
+                        WristDistance[(ushort)index0] <= CarrierHandRadius ||
+                        WristDistance[(ushort)index1] <= CarrierHandRadius ||
+                        WristDistance[(ushort)index2] <= CarrierHandRadius;
                     bool stableFingerTriangle =
                         retainStableBaseFingers &&
                         FingerWeight(SourceVertices[(ushort)index0]) >= completeHandWeight &&
@@ -4089,6 +4397,7 @@ namespace OpenClassic.XboxAvatar
             const float handRadius = 0.225f;
             FirstPersonSides = new byte[SourceVertices.Length];
             FirstPersonUsed = new bool[SourceVertices.Length];
+            WristDistance = new float[SourceVertices.Length];
             for (int index = 0; index < SourceVertices.Length; index++)
             {
                 float leftDistance = Vector3.Distance(
@@ -4098,6 +4407,7 @@ namespace OpenClassic.XboxAvatar
                     SourceVertices[index].Position,
                     wristRight);
                 float nearest = Math.Min(leftDistance, rightDistance);
+                WristDistance[index] = nearest;
                 if (nearest <= handRadius)
                 {
                     FirstPersonSides[index] = leftDistance <= rightDistance
