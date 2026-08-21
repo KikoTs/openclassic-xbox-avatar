@@ -77,9 +77,10 @@ drawn from the avatar's own mesh and skeleton, proportion-aware third-person
 held-item attachment, world lighting, caching, and vanilla-safe
 capability-gated multiplayer transfer.
 
-How far the first-person hand closes around the item is a matter of taste:
-`grip` in the add-on folder's `item-tuning.txt` runs from `0` (the open hand
-third person shows) to `1` (a full grip) and takes effect within a second of
+How far the first-person hand follows the game's own finger animation is a
+matter of taste: `grip` in the add-on folder's `item-tuning.txt` runs from `0`
+(the open hand third person shows) to `1` (exactly the game's pose - the fist
+round a pickaxe, the finger on a trigger) and takes effect within a second of
 saving, no restart.
 
 ## License

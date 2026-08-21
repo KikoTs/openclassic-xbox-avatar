@@ -134,6 +134,7 @@ internal static class FirstPersonProbe
         float curlSign = 1f;
         float leftSign = 1f;
         float grip = 0.5f;
+        bool mirror = false;
         for (int i = 5; i + 1 < args.Length; i += 2)
         {
             string option = args[i].ToLowerInvariant();
@@ -150,6 +151,7 @@ internal static class FirstPersonProbe
             else if (option == "--curlsign") { curlSign = float.Parse(value, Invariant); }
             else if (option == "--leftsign") { leftSign = float.Parse(value, Invariant); }
             else if (option == "--grip") { grip = float.Parse(value, Invariant); }
+            else if (option == "--mirror") { mirror = value == "1"; }
             else if (option == "--curl")
             {
                 string[] parts = value.Split(',');
@@ -206,7 +208,7 @@ internal static class FirstPersonProbe
             // implementations cannot hide behind a picture that looks fine.
             var scaled = new float[curl.Length];
             for (int k = 0; k < curl.Length; k++) { scaled[k] = curl[k] * grip; }
-            Matrix[] own = Repose(asset, solved, "curl", scaled, 1f, -1f, report);
+            Matrix[] own = Repose(asset, solved, "curl", scaled, 1f, -1f, true, report);
             for (int bone = 0; bone < asset.BoneCount; bone++)
             {
                 double angle = RotationBetween(skin[bone], own[bone]);
@@ -219,13 +221,15 @@ internal static class FirstPersonProbe
         }
         else if (hand != "live")
         {
-            skin = Repose(asset, skin, hand, curl, curlSign, leftSign, report);
+            skin = Repose(asset, skin, hand, curl, curlSign, leftSign, mirror, report);
             Reskin(asset, skin);
-            Log(report, "hand re-posed: " + hand + (hand == "curl"
+            Log(report, "hand re-posed: " + hand + (mirror ? " (Z-reflected at the wrist)" : "") + (hand == "curl"
                 ? string.Format(Invariant, " curl={0},{1},{2} thumb={3},{4},{5} sign={6} leftsign={7}",
                     curl[0], curl[1], curl[2], curl[3], curl[4], curl[5], curlSign, leftSign)
                 : ""));
         }
+
+        ReportFingertips(asset, report);
 
         // ---- the picture ---------------------------------------------------
         byte wantSide = side == "left" ? (byte)1 : side == "right" ? (byte)2 : (byte)0;
@@ -904,11 +908,23 @@ internal static class FirstPersonProbe
         return result;
     }
 
-    private static Matrix[] Repose(Asset asset, Matrix[] skin, string mode, float[] curl, float sign, float leftSign, StringBuilder report)
+    private static Matrix[] Repose(Asset asset, Matrix[] skin, string mode, float[] curl, float sign, float leftSign, bool mirror, StringBuilder report)
     {
         var result = (Matrix[])skin.Clone();
         var live = new Matrix[asset.BoneCount];
-        for (int bone = 0; bone < asset.BoneCount; bone++) { live[bone] = LiveBone(asset, skin, bone); }
+        var proxy = new Matrix[asset.BoneCount];
+        Matrix flip = Matrix.CreateScale(1f, 1f, -1f);
+        for (int bone = 0; bone < asset.BoneCount; bone++)
+        {
+            proxy[bone] = LiveBone(asset, skin, bone);
+            // Xbox-to-XNA handedness, applied in every pinned bone's frame, as
+            // the runtime does; the hand chains from the mirrored wrist.
+            live[bone] = mirror ? flip * proxy[bone] : proxy[bone];
+            if (mirror)
+            {
+                result[bone] = asset.InverseBindPose[bone] * Matrix.CreateScale(asset.BoneScale[bone]) * live[bone];
+            }
+        }
         foreach (int wrist in new[] { 33, 36 })
         {
             for (int bone = 0; bone < asset.BoneCount; bone++)
@@ -916,7 +932,26 @@ internal static class FirstPersonProbe
                 if (bone == wrist || !IsUnder(asset, bone, wrist)) { continue; }
                 int parent = asset.Parents[bone];
                 Matrix local = asset.SourcePoseLocal[bone];
-                if (mode == "curl")
+                if (mode == "proxylocal")
+                {
+                    // The proxy's own joint rotation, relative to its parent,
+                    // on the avatar's own bone offsets - what third person does
+                    // with every animated bone. Conjugated into the avatar's
+                    // handedness when the chain is mirrored.
+                    Matrix proxyLocal = proxy[bone] * Matrix.Invert(proxy[parent]);
+                    if (mirror) { proxyLocal = flip * proxyLocal * flip; }
+                    Vector3 ps; Quaternion pr; Vector3 pt;
+                    if (proxyLocal.Decompose(out ps, out pr, out pt))
+                    {
+                        Vector3 ss; Quaternion sr; Vector3 st;
+                        if (!local.Decompose(out ss, out sr, out st)) { ss = Vector3.One; sr = Quaternion.Identity; }
+                        Quaternion blended = Quaternion.Slerp(sr, pr, curl[0] / 42f);
+                        Matrix retargeted = Matrix.CreateScale(ss) * Matrix.CreateFromQuaternion(blended);
+                        retargeted.Translation = local.Translation;
+                        local = retargeted;
+                    }
+                }
+                else if (mode == "curl")
                 {
                     float degrees = CurlFor(bone, curl) * sign * (wrist == 33 ? leftSign : 1f);
                     if (degrees != 0f)
@@ -1039,16 +1074,17 @@ internal static class FirstPersonProbe
         foreach (Tri tri in triangles)
         {
             int[] counts;
-            if (!perBatch.TryGetValue(tri.Batch.Name, out counts)) { counts = new int[3]; perBatch[tri.Batch.Name] = counts; }
+            if (!perBatch.TryGetValue(tri.Batch.Name, out counts)) { counts = new int[4]; perBatch[tri.Batch.Name] = counts; }
             counts[0]++;
             if (tri.Stretch > 1.3f) { counts[1]++; }
             if (tri.Stretch > 1.8f) { counts[2]++; }
+            if (tri.Stretch > 2.5f) { counts[3]++; }
             if (tri.Stretch > 1.3f) { worst.Add(tri); }
         }
-        Log(report, "stretch (live edge / bind edge): batch | triangles | >1.3 | >1.8");
+        Log(report, "stretch (live edge / bind edge): batch | triangles | >1.3 | >1.8 | >2.5");
         foreach (KeyValuePair<string, int[]> entry in perBatch)
         {
-            Log(report, string.Format("  {0,-70} {1,6} {2,6} {3,6}", entry.Key, entry.Value[0], entry.Value[1], entry.Value[2]));
+            Log(report, string.Format("  {0,-70} {1,6} {2,6} {3,6} {4,6}", entry.Key, entry.Value[0], entry.Value[1], entry.Value[2], entry.Value[3]));
         }
         // Which bone pairs the stretched triangles straddle: the tear is
         // always between two bones that moved differently.
@@ -1073,6 +1109,38 @@ internal static class FirstPersonProbe
             Log(report, string.Format(Invariant, "  stretched x{0:F2} {1} tri({2},{3},{4}) bones {5} | {6} | {7}",
                 tri.Stretch, Short(tri.Batch.Name), tri.A, tri.B, tri.C,
                 BonesText(tri.Batch, tri.A), BonesText(tri.Batch, tri.B), BonesText(tri.Batch, tri.C)));
+        }
+    }
+
+    /// <summary>
+    /// Where each fingertip ends up in the current pose against where the game's
+    /// own pose put it. The proxy fist is the authored grip, so whichever curl
+    /// direction lands the tips nearer to it is the direction that closes the
+    /// hand around the item; a picture cannot tell the palm from the back of a
+    /// hand reliably, this can.
+    /// </summary>
+    private static void ReportFingertips(Asset asset, StringBuilder report)
+    {
+        int[] tips = { 61, 62, 63, 64, 65, 66, 67, 68, 69, 70 };
+        Log(report, "fingertips: bone | vertices | distance from the game's own pose | distance from bind-relative-to-wrist");
+        foreach (int tip in tips)
+        {
+            Vector3 live = Vector3.Zero, posed = Vector3.Zero;
+            int count = 0;
+            foreach (Batch batch in asset.Batches)
+            {
+                if (batch.World == null || batch.IsOverlayLayer) { continue; }
+                for (int v = 0; v < batch.Bind.Length; v++)
+                {
+                    if (DominantBone(batch, v) != tip) { continue; }
+                    live += batch.World[v];
+                    posed += batch.Skinned[v];
+                    count++;
+                }
+            }
+            if (count == 0) { continue; }
+            live /= count; posed /= count;
+            Log(report, string.Format(Invariant, "  tip {0,2} | {1,4} | {2:F4} m", tip, count, Vector3.Distance(live, posed)));
         }
     }
 

@@ -111,12 +111,12 @@ namespace OpenClassic.XboxAvatar
         private static bool _keepCoveredSkin;
 
         /// <summary>
-        /// How far the first-person hand closes around the item: 0 is the
-        /// open hand third person shows, 1 the full grip curl. The glove's
-        /// knuckles hold at either end; what looks right with a pickaxe in
-        /// the hand is a matter of taste, so it is in the tuning file.
+        /// How far the first-person hand follows the game's own finger pose:
+        /// 0 is the open hand third person shows, 1 the pose the first-person
+        /// clip holds - the fist around a pickaxe, the finger on a trigger.
+        /// The glove holds at either end; it is in the tuning file for taste.
         /// </summary>
-        private const float DefaultGrip = 0.5f;
+        private const float DefaultGrip = 1f;
         private static float _grip = DefaultGrip;
 
         internal static float Grip
@@ -583,14 +583,15 @@ namespace OpenClassic.XboxAvatar
                 "",
                 "hands mesh",
                 "",
-                "# How far the 'mesh' hand closes around the item. 0 is the",
-                "# open hand third person shows, 1 a full grip; anything",
-                "# between is fine. Only the fingers move, the glove stays",
-                "# whole at every setting.",
+                "# How far the 'mesh' hand follows the game's own finger pose.",
+                "# 1 is exactly what the game's first-person animation does -",
+                "# the fist round a pickaxe, the finger on a trigger - and 0 is",
+                "# the open hand third person shows; anything between is fine.",
+                "# Only the fingers move, the glove stays whole at every setting.",
                 "#",
-                "#     grip 0.5",
+                "#     grip 1",
                 "",
-                "grip 0.5",
+                "grip 1",
                 "",
                 "# 3. Per-item nudges, on top of the one above, for when one",
                 "# item still sits differently from the rest. The name is the",
@@ -1260,21 +1261,26 @@ namespace OpenClassic.XboxAvatar
         ///
         /// Each bone down to the wrist is pinned to its named ProxyBoy bone,
         /// so the arm follows the game's own first-person animation exactly.
-        /// The hand is not. ProxyBoy's first-person clips hold the fingers in
-        /// a fist - every finger base turned 63 degrees off the wrist, the
-        /// middle joints 80 to 110 - and an Xbox glove is not rigged for that:
-        /// its palm and knuckle vertices are weighted to the finger bases, so
-        /// each finger base dragged its own patch of palm away on its own
-        /// hinge and the glove tore open at the knuckles, on both sides of the
-        /// hand at once. Third person never showed it, because third person
-        /// poses the hand from the avatar's own skeleton.
+        /// Xbox bone frames are the opposite handedness from XNA's, which
+        /// third person handles by conjugating every local transform with a Z
+        /// reflection; going straight from the avatar's bind-local frame onto
+        /// the XNA proxy bone needs that same reflection, once per pinned
+        /// bone. Without it every bone's geometry was mirrored across its own
+        /// hinge plane: a sleeve is symmetric enough to hide that, a hand is
+        /// not. The hand came out thumb-for-pinky, and because each finger
+        /// bone was mirrored in its own frame while the wrist was mirrored in
+        /// its, the glove tore open at the knuckles - 107 triangles stretched
+        /// past 1.8x, the worst 19x, on both sides of the palm at once.
         ///
-        /// So below each wrist the hand is chained from the avatar's own local
-        /// bind transforms, exactly as third person does it, hung off the live
-        /// proxy wrist. A curl about each finger's own hinge, scaled by
-        /// <paramref name="grip"/>, closes the hand around the item - on the
-        /// Xbox rig's hinge the glove's weights were authored for, where it
-        /// holds together.
+        /// Below each wrist the hand is built the way third person builds
+        /// every animated bone: the proxy's own joint rotation, relative to
+        /// its parent and conjugated into the avatar's handedness, on the
+        /// avatar's own bone offsets. That puts every fingertip within a
+        /// millimetre of where the game's first-person clip puts it - the
+        /// pickaxe fist, the pistol's trigger finger, the support hand - with
+        /// the glove whole, because the rotations are now applied about the
+        /// avatar's own joints. <paramref name="grip"/> blends each joint
+        /// from the avatar's open bind pose (0) to the game's pose (1).
         ///
         /// The avatar's cumulative shape scale enters once, at the wrist (and
         /// at every pinned bone), in bone space: the proxy rig carries none of
@@ -1292,6 +1298,7 @@ namespace OpenClassic.XboxAvatar
             Matrix[] live)
         {
             int boneCount = asset.InverseBindPose.Length;
+            Matrix reflectZ = Matrix.CreateScale(1f, 1f, -1f);
             for (int bone = 0; bone < boneCount; bone++)
             {
                 int wrist = HandWristOf(bone);
@@ -1300,24 +1307,68 @@ namespace OpenClassic.XboxAvatar
                     : -1;
                 if (wrist < 0 || parent < 0 || parent >= bone)
                 {
+                    Vector3 shape = asset.FirstPersonBoneScale[bone];
                     live[bone] =
-                        Matrix.CreateScale(asset.FirstPersonBoneScale[bone]) *
+                        Matrix.CreateScale(shape.X, shape.Y, -shape.Z) *
                         proxyWorld[proxyBoneByAvatar[bone]];
                 }
                 else
                 {
-                    Matrix local = asset.SourcePoseLocal[bone];
-                    float degrees = GripCurlDegrees(bone) * grip;
-                    if (degrees != 0f)
-                    {
-                        local =
-                            Matrix.CreateRotationZ(MathHelper.ToRadians(degrees)) *
-                            local;
-                    }
-                    live[bone] = local * live[parent];
+                    Matrix proxyLocal =
+                        proxyWorld[proxyBoneByAvatar[bone]] *
+                        Matrix.Invert(proxyWorld[proxyBoneByAvatar[parent]]);
+                    live[bone] =
+                        RetargetHandLocal(
+                            reflectZ * proxyLocal * reflectZ,
+                            asset.SourcePoseLocal[bone],
+                            grip) *
+                        live[parent];
                 }
                 result[bone] = asset.InverseBindPose[bone] * live[bone];
             }
+        }
+
+        /// <summary>
+        /// A hand bone's local transform: the avatar's own offset and scale,
+        /// with its rotation blended from the avatar's bind pose towards the
+        /// animated joint rotation. The same retargeting third person applies
+        /// to every bone, with a blend so the grip can be opened.
+        /// </summary>
+        private static Matrix RetargetHandLocal(
+            Matrix animated,
+            Matrix sourcePose,
+            float grip)
+        {
+            Vector3 sourceScale;
+            Quaternion sourceRotation;
+            Vector3 sourceTranslation;
+            if (!sourcePose.Decompose(
+                out sourceScale,
+                out sourceRotation,
+                out sourceTranslation))
+            {
+                return sourcePose;
+            }
+            Vector3 ignoredScale;
+            Quaternion animatedRotation;
+            Vector3 ignoredTranslation;
+            if (!animated.Decompose(
+                out ignoredScale,
+                out animatedRotation,
+                out ignoredTranslation))
+            {
+                animatedRotation = sourceRotation;
+            }
+            Quaternion rotation = grip >= 1f
+                ? animatedRotation
+                : grip <= 0f
+                    ? sourceRotation
+                    : Quaternion.Slerp(sourceRotation, animatedRotation, grip);
+            Matrix result =
+                Matrix.CreateScale(sourceScale) *
+                Matrix.CreateFromQuaternion(rotation);
+            result.Translation = sourcePose.Translation;
+            return result;
         }
 
         /// <summary>
@@ -1347,43 +1398,6 @@ namespace OpenClassic.XboxAvatar
             }
             return -1;
         }
-
-        /// <summary>
-        /// How far each finger joint closes at full grip, about its own local
-        /// Z hinge. The same angles the export-space grip uses; the sign is
-        /// per hand because the Xbox rig mirrors its hinges.
-        /// </summary>
-        private static float GripCurlDegrees(int bone)
-        {
-            float sign = HandWristOf(bone) == (int)AvatarBone.WristRight
-                ? RightHandCurlSign
-                : LeftHandCurlSign;
-            switch (bone)
-            {
-                case 37: case 38: case 39: case 40:
-                case 44: case 45: case 46: case 47:
-                    return 42f * sign;
-                case 51: case 52: case 53: case 54:
-                case 56: case 57: case 58: case 59:
-                    return 55f * sign;
-                case 61: case 62: case 63: case 64:
-                case 66: case 67: case 68: case 69:
-                    return 35f * sign;
-                case 43: case 50:
-                    return 18f * sign;
-                case 55: case 60:
-                    return 28f * sign;
-                case 65: case 70:
-                    return 16f * sign;
-                default:
-                    return 0f;
-            }
-        }
-
-        // Established by rendering both directions offline: positive closes
-        // the right hand towards its palm; the left rig's hinges are mirrored.
-        private const float RightHandCurlSign = 1f;
-        private const float LeftHandCurlSign = -1f;
 
         private void DrawMappedFirstPerson(
             GraphicsDevice device,

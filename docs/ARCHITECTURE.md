@@ -27,12 +27,13 @@ atomically replaces the previous imported avatar.
 - skinned third-person rendering;
 - layered base, palette, and decal materials;
 - animated face masks and expressions;
-- first-person hands: the arm and sleeve follow the game's own ProxyBoy
-  first-person animation bone for bone, while everything below each wrist is
-  chained from the avatar's own skeleton and closed around the item by a
-  tunable grip curl. ProxyBoy's finger bones are deliberately not used: its
-  first-person clips hold a fist an Xbox glove is not rigged for, and pinning
-  the glove to it tore the palm open at the knuckles;
+- first-person hands: the arm follows the game's own ProxyBoy first-person
+  animation bone for bone, each bone frame converted from the Xbox rig's
+  handedness to XNA's; below each wrist, ProxyBoy's joint rotations are
+  applied to the avatar's own bone offsets, exactly as third person retargets
+  every animated bone, so the fingers land where the game's clip puts them
+  (the pickaxe fist, the trigger finger) with the glove whole. A tunable grip
+  blends that towards the open hand;
 - proportion-aware held-item attachment targeting the imported avatar's live
   finger-and-thumb grip center instead of its low invisible prop bone;
 - world and torch lighting;
@@ -72,5 +73,7 @@ the exact camera by least squares. The tool then re-skins the asset from those
 - reproducing the game's output to a few micrometres - and can re-pose the hand
 (`--hand straight|curl|runtime`), call the runtime's own posing code, colour
 by batch, bone or edge stretch, and render the textured hand at any zoom. The
-knuckle tear was found, measured and fixed against it without launching the
-game. `FirstPersonHandSmoke` in the build guards the fix.
+knuckle tear and the mirrored hand behind it were found, measured and fixed
+against it without launching the game; the final posing reproduces the game's
+own fingertip positions to a millimetre. `FirstPersonHandSmoke` in the build
+guards the fix.

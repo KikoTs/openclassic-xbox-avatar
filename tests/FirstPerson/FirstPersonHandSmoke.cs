@@ -8,18 +8,22 @@ using Microsoft.Xna.Framework;
 
 // Guards the first-person hand pose.
 //
-// First person pins the arm to the game's ProxyBoy rig and chains the hand
-// below each wrist from the avatar's own skeleton. The regression this exists
-// to catch is the one that shipped for a while: finger bones pinned to
-// ProxyBoy's first-person fist, which an Xbox glove is not rigged for, so the
-// glove tore open at the knuckles. Three things are checked against a real
-// avatar:
+// First person pins the arm to the game's ProxyBoy rig, converting each bone
+// frame from the Xbox rig's handedness to XNA's, and below each wrist applies
+// ProxyBoy's joint rotations to the avatar's own bone offsets. The regression
+// this exists to catch is the one that shipped for a while: avatar bone frames
+// multiplied straight onto the XNA proxy bones, which mirrored every bone's
+// geometry in its own frame - the hand came out thumb-for-pinky and the glove
+// tore open at the knuckles. Against a real avatar:
 //
-//   1. At grip 0 the hand is exactly its bind pose relative to the wrist, for
-//      every vertex in the hand volume of every batch.
-//   2. Whatever ProxyBoy does with its finger bones makes no difference.
-//   3. At full grip no hand triangle tears: the worst edge stretch stays far
-//      below the 19x the fist produced.
+//   1. With the proxy rig standing in the avatar's bind pose, the hand is the
+//      bind pose at every grip, for every vertex in every hand volume.
+//   2. The hand takes its joint rotations from the proxy rig and its bone
+//      positions from the avatar: moving the proxy's hand bones changes
+//      nothing, rotating them moves the fingers.
+//   3. The game's fist - finger bases 63 degrees, middle joints 90, tips 40 -
+//      does not tear the hand either way round: the worst edge stretch stays
+//      far below the 19x the mirrored hand produced.
 internal static class FirstPersonHandSmoke
 {
     private const BindingFlags Hidden =
@@ -86,13 +90,14 @@ internal static class FirstPersonHandSmoke
         Require(build != null, "runtime has no BuildFirstPersonSkinTransforms");
 
         // A proxy rig standing exactly where the avatar's bind pose stands,
-        // with the avatar's shape scale taken back out, since the real proxy
-        // rig carries none and the runtime puts it back in.
+        // in XNA handedness, with the avatar's shape scale taken back out -
+        // the real proxy rig carries neither and the runtime puts both in.
         var proxy = new Matrix[bones];
         var identity = new int[bones];
         for (int bone = 0; bone < bones; bone++)
         {
-            proxy[bone] = Matrix.Invert(Matrix.CreateScale(boneScale[bone])) * bindAbsolute[bone];
+            Vector3 s = boneScale[bone];
+            proxy[bone] = Matrix.Invert(Matrix.CreateScale(s.X, s.Y, -s.Z)) * bindAbsolute[bone];
             identity[bone] = bone;
         }
         var result = new Matrix[bones];
@@ -103,89 +108,149 @@ internal static class FirstPersonHandSmoke
             if (WristOf(bone) >= 0) { hand.Add(bone); }
         }
         Require(hand.Count >= 30, "expected the finger bones below both wrists, found " + hand.Count);
+        Array batches = (Array)Field(assetType, asset, "Batches");
 
-        // 1. Grip 0 is the bind pose.
-        build.Invoke(null, new object[] { asset, proxy, identity, 0f, result, scratch });
+        // 1. A proxy rig in the bind pose gives the bind pose, at every grip.
         float worstRest = 0f;
         int restVertices = 0;
-        foreach (object batch in (Array)Field(assetType, asset, "Batches"))
+        foreach (float grip in new[] { 0f, 0.5f, 1f })
         {
-            Type batchType = batch.GetType();
-            short[] volume = (short[])Field(batchType, batch, "FirstPersonIndices");
-            if (volume == null || volume.Length == 0) { continue; }
-            Array vertices = (Array)Field(batchType, batch, "SourceVertices");
-            var seen = new HashSet<int>();
-            foreach (short raw in volume)
+            build.Invoke(null, new object[] { asset, proxy, identity, grip, result, scratch });
+            restVertices = 0;
+            foreach (object batch in batches)
             {
-                int index = (ushort)raw;
-                if (!seen.Add(index)) { continue; }
-                object vertex = vertices.GetValue(index);
-                Vector3 bind = (Vector3)Field(vertex.GetType(), vertex, "Position");
-                Vector3 posed = Skin(vertex, bind, result, bones);
-                worstRest = Math.Max(worstRest, Vector3.Distance(bind, posed));
-                restVertices++;
+                Type batchType = batch.GetType();
+                short[] volume = (short[])Field(batchType, batch, "FirstPersonIndices");
+                if (volume == null || volume.Length == 0) { continue; }
+                Array vertices = (Array)Field(batchType, batch, "SourceVertices");
+                var seen = new HashSet<int>();
+                foreach (short raw in volume)
+                {
+                    int index = (ushort)raw;
+                    if (!seen.Add(index)) { continue; }
+                    object vertex = vertices.GetValue(index);
+                    Vector3 bind = (Vector3)Field(vertex.GetType(), vertex, "Position");
+                    Vector3 posed = Skin(vertex, bind, result, bones);
+                    worstRest = Math.Max(worstRest, Vector3.Distance(bind, posed));
+                    restVertices++;
+                }
             }
         }
         Require(restVertices > 0, "no hand-volume vertices to check");
         Require(worstRest < 0.001f, string.Format(
-            "at grip 0 the hand is {0:F4} m off its bind pose; it must be the bind pose", worstRest));
+            "with the proxy rig at bind the hand is {0:F4} m off its bind pose; it must be the bind pose", worstRest));
 
-        // 2. ProxyBoy's finger bones are ignored.
-        var twisted = (Matrix[])proxy.Clone();
+        // 2. Joint rotations come from the proxy rig, bone positions from the
+        //    avatar. Shifting every hand bone of the proxy changes nothing;
+        //    rotating a finger base moves that finger.
+        var shifted = (Matrix[])proxy.Clone();
         foreach (int bone in hand)
         {
-            twisted[bone] = Matrix.CreateRotationX(1.1f) * Matrix.CreateTranslation(0.2f, -0.1f, 0.3f) * proxy[bone];
+            shifted[bone] = proxy[bone] * Matrix.CreateTranslation(0.2f, -0.1f, 0.3f);
         }
-        var resultTwisted = new Matrix[bones];
-        build.Invoke(null, new object[] { asset, twisted, identity, 0f, resultTwisted, scratch });
-        foreach (int bone in hand)
-        {
-            Require(Same(result[bone], resultTwisted[bone]), "bone " + bone + " followed the proxy rig's finger pose");
-        }
-
-        // 3. Full grip does not tear the hand.
+        var resultShifted = new Matrix[bones];
+        build.Invoke(null, new object[] { asset, shifted, identity, 1f, resultShifted, scratch });
         build.Invoke(null, new object[] { asset, proxy, identity, 1f, result, scratch });
+        foreach (int bone in hand)
+        {
+            Require(Same(result[bone], resultShifted[bone]), "bone " + bone + " took its position from the proxy rig");
+        }
+        int indexBase = (int)AvatarBone.FingerIndexRight;
+        int indexTip = (int)AvatarBone.FingerIndex3Right;
+        Matrix[] bent = Fist(proxy, bones, new[] { indexBase }, 0.6f);
+        build.Invoke(null, new object[] { asset, bent, identity, 1f, resultShifted, scratch });
+        Vector3 tipBefore = Vector3.Transform(bindAbsolute[indexTip].Translation, result[indexTip]);
+        Vector3 tipAfter = Vector3.Transform(bindAbsolute[indexTip].Translation, resultShifted[indexTip]);
+        float moved = Vector3.Distance(tipBefore, tipAfter);
+        Require(moved > 0.01f, string.Format(
+            "rotating the proxy's index finger 0.6 rad moved the fingertip only {0:F4} m; the hand ignores the proxy's joints", moved));
+
+        // 3. The game's fist does not tear the hand, whichever way its hinges
+        //    turn out to run on this rig.
         float worstStretch = 0f;
         int torn = 0, triangles = 0;
-        foreach (object batch in (Array)Field(assetType, asset, "Batches"))
+        int[] bases = { 44, 45, 46, 47 };
+        int[] middles = { 56, 57, 58, 59 };
+        int[] tips = { 66, 67, 68, 69 };
+        foreach (float direction in new[] { 1f, -1f })
         {
-            Type batchType = batch.GetType();
-            short[] volume = (short[])Field(batchType, batch, "FirstPersonIndices");
-            if (volume == null || volume.Length < 3) { continue; }
-            Array vertices = (Array)Field(batchType, batch, "SourceVertices");
-            for (int t = 0; t + 2 < volume.Length; t += 3)
+            Matrix[] fist = Fist(proxy, bones, bases, 1.1f * direction);
+            fist = Fist(fist, bones, middles, 1.57f * direction);
+            fist = Fist(fist, bones, tips, 0.7f * direction);
+            build.Invoke(null, new object[] { asset, fist, identity, 1f, result, scratch });
+            torn = 0; triangles = 0;
+            foreach (object batch in batches)
             {
-                var bind = new Vector3[3];
-                var posed = new Vector3[3];
-                for (int k = 0; k < 3; k++)
+                Type batchType = batch.GetType();
+                short[] volume = (short[])Field(batchType, batch, "FirstPersonIndices");
+                if (volume == null || volume.Length < 3) { continue; }
+                Array vertices = (Array)Field(batchType, batch, "SourceVertices");
+                for (int t = 0; t + 2 < volume.Length; t += 3)
                 {
-                    object vertex = vertices.GetValue((ushort)volume[t + k]);
-                    bind[k] = (Vector3)Field(vertex.GetType(), vertex, "Position");
-                    posed[k] = Skin(vertex, bind[k], result, bones);
+                    var bind = new Vector3[3];
+                    var posed = new Vector3[3];
+                    for (int k = 0; k < 3; k++)
+                    {
+                        object vertex = vertices.GetValue((ushort)volume[t + k]);
+                        bind[k] = (Vector3)Field(vertex.GetType(), vertex, "Position");
+                        posed[k] = Skin(vertex, bind[k], result, bones);
+                    }
+                    float stretch = 1f;
+                    for (int k = 0; k < 3; k++)
+                    {
+                        float before = Vector3.Distance(bind[k], bind[(k + 1) % 3]);
+                        float after = Vector3.Distance(posed[k], posed[(k + 1) % 3]);
+                        if (before > 1e-5f) { stretch = Math.Max(stretch, after / before); }
+                    }
+                    worstStretch = Math.Max(worstStretch, stretch);
+                    if (stretch > 2.5f) { torn++; }
+                    triangles++;
                 }
-                float stretch = 1f;
-                for (int k = 0; k < 3; k++)
-                {
-                    float before = Vector3.Distance(bind[k], bind[(k + 1) % 3]);
-                    float after = Vector3.Distance(posed[k], posed[(k + 1) % 3]);
-                    if (before > 1e-5f) { stretch = Math.Max(stretch, after / before); }
-                }
-                worstStretch = Math.Max(worstStretch, stretch);
-                if (stretch > 2.5f) { torn++; }
-                triangles++;
             }
+            // The game's own fist peaks around 4x at one pinky-knuckle
+            // triangle; the mirrored hand reached 19x.
+            Require(worstStretch < 7f, string.Format(
+                "the fist stretches a hand triangle {0:F1}x; the hand is tearing", worstStretch));
+            Require(torn * 50 <= triangles, string.Format(
+                "the fist stretches {0} of {1} hand triangles beyond 2.5x", torn, triangles));
         }
-        // A healthy full grip peaks around 3x at the thumb web; the fist that
-        // tore the glove reached 19x.
-        Require(worstStretch < 6f, string.Format(
-            "full grip stretches a hand triangle {0:F1}x; the hand is tearing", worstStretch));
-        Require(torn * 100 <= triangles, string.Format(
-            "full grip stretches {0} of {1} hand triangles beyond 2.5x", torn, triangles));
 
         Console.WriteLine(string.Format(
-            "PASS FirstPersonHandSmoke: {0} hand vertices at bind ({1:E1} m), {2} hand bones independent of the proxy rig, full grip worst stretch {3:F2}x over {4} triangles",
+            "PASS FirstPersonHandSmoke: {0} hand vertices at bind ({1:E1} m), {2} hand bones positioned by the avatar and rotated by the proxy rig, fist worst stretch {3:F2}x over {4} triangles",
             restVertices, worstRest, hand.Count, worstStretch, triangles));
         return 0;
+    }
+
+    /// <summary>
+    /// The proxy rig with each given bone, and everything below it, turned by
+    /// <paramref name="radians"/> about that bone's own Z hinge.
+    /// </summary>
+    private static Matrix[] Fist(Matrix[] proxy, int bones, int[] joints, float radians)
+    {
+        var result = (Matrix[])proxy.Clone();
+        foreach (int joint in joints)
+        {
+            Matrix turn = Matrix.Invert(proxy[joint]) * Matrix.CreateRotationZ(radians) * proxy[joint];
+            for (int bone = 0; bone < bones; bone++)
+            {
+                if (bone == joint || IsBelow(bone, joint))
+                {
+                    result[bone] = result[bone] * turn;
+                }
+            }
+        }
+        return result;
+    }
+
+    private static bool IsBelow(int bone, int ancestor)
+    {
+        int current = bone;
+        for (int guard = 0; guard < 128 && current >= 0 && current < Avatar.DefaultParentBones.Count; guard++)
+        {
+            current = Avatar.DefaultParentBones[current];
+            if (current == ancestor) { return true; }
+        }
+        return false;
     }
 
     private static Vector3 Skin(object vertex, Vector3 bind, Matrix[] skin, int bones)
