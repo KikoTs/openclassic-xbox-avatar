@@ -72,9 +72,15 @@ See [architecture](docs/ARCHITECTURE.md), [installation](docs/INSTALL.md),
 
 The v3 avatar format supports the assembled 71-bone model, height and build
 proportions, independent material/decal passes, facial layers and expressions,
-outfit sleeves, bare hands, fingerless gloves, full gloves, first-person hand
-projection, proportion-aware third-person held-item attachment, world
-lighting, caching, and vanilla-safe capability-gated multiplayer transfer.
+outfit sleeves, bare hands, fingerless gloves, full gloves, first-person hands
+drawn from the avatar's own mesh and skeleton, proportion-aware third-person
+held-item attachment, world lighting, caching, and vanilla-safe
+capability-gated multiplayer transfer.
+
+How far the first-person hand closes around the item is a matter of taste:
+`grip` in the add-on folder's `item-tuning.txt` runs from `0` (the open hand
+third person shows) to `1` (a full grip) and takes effect within a second of
+saving, no restart.
 
 ## License
 

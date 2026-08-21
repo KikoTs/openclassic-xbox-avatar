@@ -177,6 +177,19 @@ Invoke-Native 'AvatarAttachmentSmoke compilation' {
     & $frameworkCsc $attachmentTestArguments
 }
 
+$handTestSource = Join-Path $repoRoot 'tests\FirstPerson\FirstPersonHandSmoke.cs'
+$handTestOut = Join-Path $bin 'FirstPersonHandSmoke.exe'
+$handTestArguments = @(
+    '/nologo', '/target:exe', '/optimize+', '/platform:x86',
+    "/out:$handTestOut",
+    "/reference:$commonDll",
+    "/reference:$xnaFramework",
+    $handTestSource
+)
+Invoke-Native 'FirstPersonHandSmoke compilation' {
+    & $frameworkCsc $handTestArguments
+}
+
 # Offline renderer. Rasterises an .ocavatar to a PNG using the same loader and
 # skinning the game uses, so texture and attachment work can be seen and diffed
 # without launching the game.
@@ -192,6 +205,23 @@ $renderProbeArguments = @(
 )
 Invoke-Native 'AvatarRenderProbe compilation' {
     & $frameworkCsc $renderProbeArguments
+}
+
+# First-person renderer. Recovers the live bone matrices and camera from the
+# runtime's first-person dump, then re-poses and rasterises the hand offline,
+# so a first-person fault can be reproduced and a fix judged without the game.
+$firstPersonProbeOut = Join-Path $bin 'FirstPersonProbe.exe'
+$firstPersonProbeSource = Join-Path $repoRoot 'tools\FirstPersonProbe.cs'
+$firstPersonProbeArguments = @(
+    '/nologo', '/target:exe', '/optimize+', '/platform:x86',
+    "/out:$firstPersonProbeOut",
+    "/reference:$commonDll",
+    "/reference:$xnaFramework",
+    '/reference:System.Drawing.dll',
+    $firstPersonProbeSource
+)
+Invoke-Native 'FirstPersonProbe compilation' {
+    & $frameworkCsc $firstPersonProbeArguments
 }
 
 $managerProject = Join-Path $repoRoot 'src\Manager\AvatarModPatcher.csproj'
@@ -293,6 +323,9 @@ $smokeTests = @(
        Arguments = @((Join-Path $GameDirectory 'CastleMinerZ.exe'), $commonDll, $runtimeOut)
        Needs     = $null },
     @{ Name      = 'AvatarAttachmentSmoke'
+       Arguments = @($runtimeOut, $sampleAvatar, $GameDirectory)
+       Needs     = $sampleAvatar },
+    @{ Name      = 'FirstPersonHandSmoke'
        Arguments = @($runtimeOut, $sampleAvatar, $GameDirectory)
        Needs     = $sampleAvatar }
 )
