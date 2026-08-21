@@ -146,7 +146,7 @@ namespace OpenClassic.XboxAvatar
             Mesh,
         }
 
-        private static HandBuild _hands = HandBuild.Hybrid;
+        private static HandBuild _hands = HandBuild.Mesh;
 
         internal static HandBuild Hands
         {
@@ -313,7 +313,7 @@ namespace OpenClassic.XboxAvatar
             _mode = Placement.Hand;
             _global = Vector3.Zero;
             _handSpace = true;
-            _hands = HandBuild.Hybrid;
+            _hands = HandBuild.Mesh;
             foreach (string raw in lines)
             {
                 string line = raw.Trim();
@@ -503,10 +503,11 @@ namespace OpenClassic.XboxAvatar
                 "# looks wrong in first person but right in third comes from",
                 "# that rebuild.",
                 "#",
-                "#     hands hybrid    the game's hand, your textures  (default)",
+                "#     hands mesh      your own hand and glove  (default)",
+                "#     hands hybrid    the game's hand, your textures",
                 "#     hands tinted    the game's hand, one flat colour per material",
                 "#     hands carrier   the game's hand pulled onto your surface",
-                "#     hands mesh      your own hand, as third person draws it",
+
                 "#",
                 "# 'hybrid' keeps the game's hand shape and dresses it in your",
                 "# avatar's materials, deciding per triangle which one covers",
@@ -520,7 +521,7 @@ namespace OpenClassic.XboxAvatar
                 "# 'mesh' draws your own hand, whose fingers come apart in the",
                 "# pose used to hold an item - which is why the others exist.",
                 "",
-                "hands hybrid",
+                "hands mesh",
                 "",
                 "# 3. Per-item nudges, on top of the one above, for when one",
                 "# item still sits differently from the rest. The name is the",
@@ -1205,9 +1206,24 @@ namespace OpenClassic.XboxAvatar
                     shape *
                     target;
             }
+            // Skin whatever this hand build is going to draw, which is not
+            // always what the carrier build draws.
+            //
+            // A glove's mapped indices are deliberately empty, because the
+            // carrier stands in for it. Gating the skinning on those indices
+            // therefore left the glove's vertices in third-person space while
+            // "hands mesh" went ahead and drew 700 triangles of them, which
+            // land nowhere near the camera. That is the missing glove: the
+            // geometry was selected, textured and drawn, and simply never
+            // moved into first person.
+            ItemTuning.HandBuild hands = ItemTuning.Hands;
+            bool meshHands = hands == ItemTuning.HandBuild.Mesh;
             foreach (AvatarBatch batch in _asset.Batches)
             {
-                if (batch.MappedFirstPersonIndices.Length >= 3)
+                short[] drawn = meshHands
+                    ? batch.MappedFirstPersonHandIndices
+                    : batch.MappedFirstPersonIndices;
+                if (drawn != null && drawn.Length >= 3)
                 {
                     SkinBatch(batch, true);
                 }
@@ -1252,8 +1268,6 @@ namespace OpenClassic.XboxAvatar
                 int renderedTriangles = 0;
                 // "mesh" draws the avatar's own hand, the same geometry third
                 // person uses; "carrier" rebuilds ProxyBoy's hand against it.
-                ItemTuning.HandBuild hands = ItemTuning.Hands;
-                bool meshHands = hands == ItemTuning.HandBuild.Mesh;
                 foreach (AvatarBatch batch in _asset.Batches)
                 {
                     short[] indices = meshHands
@@ -3295,6 +3309,73 @@ namespace OpenClassic.XboxAvatar
             return fallback;
         }
 
+        /// <summary>
+        /// What geometry each batch offers first person, written when the
+        /// avatar loads.
+        ///
+        /// The draw-time report only appears if the draw reaches the end of
+        /// its path, so it says nothing about a batch that never draws - which
+        /// is precisely the case worth explaining. This one is written from
+        /// the loader and cannot be silenced by whatever happens later.
+        /// </summary>
+        private static short[] ConcatenateIndices(short[] first, short[] second)
+        {
+            int firstCount = first == null ? 0 : first.Length;
+            int secondCount = second == null ? 0 : second.Length;
+            var result = new short[firstCount + secondCount];
+            if (firstCount > 0)
+            {
+                Array.Copy(first, 0, result, 0, firstCount);
+            }
+            if (secondCount > 0)
+            {
+                Array.Copy(second, 0, result, firstCount, secondCount);
+            }
+            return result;
+        }
+
+        private static void WriteHandGeometryReport(AvatarAsset asset)
+        {
+            try
+            {
+                var lines = new List<string>();
+                lines.Add(
+                    "name".PadRight(58) +
+                    " third mapped handOnly  body hand shell fingers");
+                foreach (AvatarBatch batch in asset.Batches)
+                {
+                    lines.Add(
+                        (batch.Name ?? "?").PadRight(58) +
+                        " " + (batch.ThirdPersonIndices == null
+                            ? 0 : batch.ThirdPersonIndices.Length / 3).ToString().PadLeft(5) +
+                        " " + (batch.MappedFirstPersonIndices == null
+                            ? 0 : batch.MappedFirstPersonIndices.Length / 3).ToString().PadLeft(6) +
+                        " " + (batch.MappedFirstPersonHandIndices == null
+                            ? 0 : batch.MappedFirstPersonHandIndices.Length / 3).ToString().PadLeft(8) +
+                        "  " + (batch.IsBaseBody ? "yes " : "no  ") +
+                        " " + (batch.IsHandComponent ? "yes " : "no  ") +
+                        " " + (batch.IsBareHandShell ? "yes  " : "no   ") +
+                        " " + (batch.HasFingerGeometry ? "yes" : "no"));
+                }
+                lines.Add("");
+                lines.Add("baseBody=" + (asset.BaseBodyBatch == null
+                    ? "none" : asset.BaseBodyBatch.Name));
+                lines.Add("bareHandShell=" + (asset.BareHandShell == null
+                    ? "none" : asset.BareHandShell.Name));
+                lines.Add("outerHandBatches=" + asset.OuterHandBatches.Count);
+                string folder = Branding.AvatarFolder(
+                    AppDomain.CurrentDomain.BaseDirectory);
+                Directory.CreateDirectory(folder);
+                File.WriteAllLines(
+                    Path.Combine(folder, "hand-geometry.log"),
+                    lines.ToArray());
+            }
+            catch
+            {
+                // Diagnostics must never stop an avatar loading.
+            }
+        }
+
         internal static AvatarAsset Load(string path)
         {
             using (var stream = File.OpenRead(path))
@@ -3415,14 +3496,6 @@ namespace OpenClassic.XboxAvatar
                         asset.AddOuterHandBatch(batch);
                     }
 
-                    // Keep the avatar's own arm and hand geometry, entire, for
-                    // the "hands mesh" mode: the same triangles third person
-                    // draws, so first person can show the hand the avatar
-                    // actually has instead of a re-projection of ProxyBoy's.
-                    batch.BuildMappedFirstPersonGeometry(false, false);
-                    batch.MappedFirstPersonHandIndices =
-                        batch.MappedFirstPersonIndices;
-
                     // First person uses the continuous ProxyBoy hand topology as
                     // a carrier, morphed to the exported Xbox surface. Suppress
                     // every exported hand layer here so duplicate palm/finger
@@ -3466,6 +3539,26 @@ namespace OpenClassic.XboxAvatar
                     asset.BaseBodyBatch.RemoveCoveredThirdPersonHandGeometry(
                         outerHands);
                 }
+                // What "hands mesh" draws: the arm this batch already
+                // contributes, plus the avatar's own hand.
+                //
+                // Not the whole arm-and-hand selection - that was the first
+                // attempt and it is why mesh showed fingers and nothing else.
+                // Those triangles are drawn through the first-person hand
+                // placement, which is built to position a hand; give it a
+                // whole arm and everything beyond the wrist lands somewhere
+                // off camera, leaving only the few triangles near the fingers
+                // on screen. FirstPersonIndices is the compact hand volume the
+                // placement is designed for, and is exactly the piece the
+                // carrier was standing in for.
+                foreach (AvatarBatch batch in asset.Batches)
+                {
+                    batch.MappedFirstPersonHandIndices = ConcatenateIndices(
+                        batch.MappedFirstPersonIndices,
+                        batch.FirstPersonIndices);
+                }
+
+                WriteHandGeometryReport(asset);
                 asset.FirstPersonScaleLeft = ComputeFirstPersonScale(
                     asset,
                     (int)AvatarBone.WristLeft,
