@@ -106,7 +106,10 @@ internal static class AvatarRenderProbe
                 return 1;
             }
             Render(
-                objTriangles, args[3], address, alphaCut, view, zoom, size,
+                objTriangles, args[3], address, alphaCut, view,
+                objPath.IndexOf("view", StringComparison.OrdinalIgnoreCase) >= 0
+                    ? "screen" : zoom,
+                size,
                 new List<KeyValuePair<Vector3, Color>>());
             Console.WriteLine(
                 "wrote " + args[3] +
@@ -338,10 +341,20 @@ internal static class AvatarRenderProbe
     /// its own colour so the batches can be told apart on sight, which is what
     /// says whether a hole belongs to the glove, the skin or the sleeve.
     /// </summary>
-    private static bool OffScreen(Vector3 p)
+    /// <summary>
+    /// Whether a point is behind the viewer, which is the only reason to drop
+    /// a triangle from a camera-space dump.
+    ///
+    /// Rejecting anything outside the frame as well threw away whole triangles
+    /// that merely straddle the edge of the screen. The game clips those to
+    /// the pixel and draws the part that fits; dropping them entirely bites
+    /// chunks out of a hand sitting in the corner of the view, which is
+    /// exactly where a first-person hand sits. That made the tool invent the
+    /// very fault it was meant to be measuring.
+    /// </summary>
+    private static bool BehindCamera(Vector3 p)
     {
-        return Math.Abs(p.X) > 1.05f || Math.Abs(p.Y) > 1.05f ||
-            p.Z < -0.05f || p.Z > 1.05f;
+        return p.Z < 0f || p.Z > 1f;
     }
 
     private static List<Triangle> LoadObj(
@@ -401,7 +414,9 @@ internal static class AvatarRenderProbe
             // strays off screen throws away most of a hand that reaches the
             // edge of the frame, which is exactly what a first-person hand
             // does.
-            if (clip && OffScreen((positions[a] + positions[b] + positions[c]) / 3f))
+            if (clip && (BehindCamera(positions[a]) ||
+                BehindCamera(positions[b]) ||
+                BehindCamera(positions[c])))
             {
                 continue;
             }
@@ -450,7 +465,13 @@ internal static class AvatarRenderProbe
             }
         }
 
-        if (zoom == "hand" && markerPoints.Count > 0)
+        if (zoom == "screen")
+        {
+            // The frame the game actually shows, so the picture is the
+            // player.s view rather than a close-up of whatever survived.
+            minX = -1f; maxX = 1f; minY = -1f; maxY = 1f;
+        }
+        else if (zoom == "hand" && markerPoints.Count > 0)
         {
             Vector2 c = Project(markerPoints[0].Key, view);
             float r = Math.Max(maxY - minY, 1e-4f) * 0.12f;
