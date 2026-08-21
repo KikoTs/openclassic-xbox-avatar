@@ -340,7 +340,7 @@ internal static class AvatarRenderProbe
     /// </summary>
     private static bool OffScreen(Vector3 p)
     {
-        return Math.Abs(p.X) > 6f || Math.Abs(p.Y) > 6f ||
+        return Math.Abs(p.X) > 1.05f || Math.Abs(p.Y) > 1.05f ||
             p.Z < -0.05f || p.Z > 1.05f;
     }
 
