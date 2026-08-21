@@ -1797,12 +1797,36 @@ namespace OpenClassic.XboxAvatar
             }
             foreach (AvatarBatch batch in _asset.Batches)
             {
-                if (batch.Texture == null && batch.TexturePng != null && batch.TexturePng.Length > 0)
+                if (batch.Texture != null ||
+                    batch.TextureUnavailable ||
+                    batch.TexturePng == null ||
+                    batch.TexturePng.Length == 0)
+                {
+                    continue;
+                }
+                try
                 {
                     using (var stream = new MemoryStream(batch.TexturePng, false))
                     {
                         batch.Texture = Texture2D.FromStream(device, stream);
                     }
+                }
+                catch (Exception exception)
+                {
+                    // One texture that will not decode must not cost the whole
+                    // avatar.
+                    //
+                    // This ran inside the draw's own try, so a single failure
+                    // set _failed and dropped the player to the stock model for
+                    // the rest of the session - the avatar disappearing
+                    // entirely because one image out of dozens would not load.
+                    // Give up on this batch alone, and remember that, so the
+                    // next frame does not try again and log the same failure
+                    // sixty times a second.
+                    batch.TextureUnavailable = true;
+                    WriteFailure(new InvalidOperationException(
+                        "Texture failed to load for batch " + batch.Name,
+                        exception));
                 }
             }
         }
@@ -3916,6 +3940,12 @@ namespace OpenClassic.XboxAvatar
         internal Vector3 DiffuseColor;
         internal byte[] TexturePng;
         internal Texture2D Texture;
+
+        /// <summary>
+        /// This batch's image would not decode, so stop trying. Drawn untextured
+        /// rather than not at all.
+        /// </summary>
+        internal bool TextureUnavailable;
         internal uint CategoryMask;
         internal int ShaderId;
         internal byte PaletteMask;
