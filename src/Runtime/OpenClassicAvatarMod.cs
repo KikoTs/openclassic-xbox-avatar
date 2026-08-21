@@ -1395,7 +1395,7 @@ namespace OpenClassic.XboxAvatar
                         renderedTriangles,
                         view,
                         projection);
-                    DumpFirstPersonMesh(meshHands, hands);
+                    DumpFirstPersonMesh(meshHands, hands, view, projection);
                     _firstPersonLogged = true;
                 }
             }
@@ -1422,60 +1422,79 @@ namespace OpenClassic.XboxAvatar
         /// </summary>
         private void DumpFirstPersonMesh(
             bool meshHands,
-            ItemTuning.HandBuild build)
+            ItemTuning.HandBuild build,
+            Matrix view,
+            Matrix projection)
         {
             try
             {
-                var text = new System.Text.StringBuilder();
-                text.Append("# first-person hand as drawn, build=")
-                    .Append(build.ToString().ToLowerInvariant())
-                    .Append(Environment.NewLine);
-                int written = 0;
-
-                foreach (AvatarBatch batch in _asset.Batches)
-                {
-                    short[] indices = meshHands
-                        ? batch.MappedFirstPersonHandIndices
-                        : batch.MappedFirstPersonIndices;
-                    if (indices == null || indices.Length < 3)
-                    {
-                        continue;
-                    }
-                    written += AppendObjGroup(
-                        text,
-                        batch.Name,
-                        batch.DrawVertices,
-                        indices,
-                        written);
-                }
-
-                if (!meshHands)
-                {
-                    int part = 0;
-                    foreach (ProxyHandCarrierPart carrierPart in
-                        _firstPersonCarrier.Parts)
-                    {
-                        written += AppendObjGroup(
-                            text,
-                            "carrier" + part + "-" + carrierPart.Material.Name,
-                            carrierPart.DrawVertices,
-                            carrierPart.Indices,
-                            written);
-                        part++;
-                    }
-                }
-
                 string folder = Branding.AvatarFolder(
                     AppDomain.CurrentDomain.BaseDirectory);
                 Directory.CreateDirectory(folder);
-                File.WriteAllText(
+
+                // Twice: once in world space, and once through the player's own
+                // camera. The camera copy makes the offline render the same
+                // picture the player is looking at, so a fault reported from a
+                // screenshot can be found in a file rather than guessed at from
+                // a hand a hundred pixels across.
+                Matrix camera = view * projection;
+                WriteFirstPersonObj(
                     Path.Combine(folder, "first-person-mesh.obj"),
-                    text.ToString());
+                    build, meshHands, null);
+                WriteFirstPersonObj(
+                    Path.Combine(folder, "first-person-view.obj"),
+                    build, meshHands, camera);
             }
             catch (Exception exception)
             {
                 WriteFailure(exception);
             }
+        }
+
+        private void WriteFirstPersonObj(
+            string path,
+            ItemTuning.HandBuild build,
+            bool meshHands,
+            Matrix? camera)
+        {
+            var text = new System.Text.StringBuilder();
+            text.Append("# first-person hand as drawn, build=")
+                .Append(build.ToString().ToLowerInvariant())
+                .Append(camera.HasValue ? ", camera space" : ", world space")
+                .Append(Environment.NewLine);
+            int written = 0;
+
+            foreach (AvatarBatch batch in _asset.Batches)
+            {
+                short[] indices = meshHands
+                    ? batch.MappedFirstPersonHandIndices
+                    : batch.MappedFirstPersonIndices;
+                if (indices == null || indices.Length < 3)
+                {
+                    continue;
+                }
+                written += AppendObjGroup(
+                    text, batch.Name, batch.DrawVertices, indices,
+                    written, camera);
+            }
+
+            if (!meshHands)
+            {
+                int part = 0;
+                foreach (ProxyHandCarrierPart carrierPart in
+                    _firstPersonCarrier.Parts)
+                {
+                    written += AppendObjGroup(
+                        text,
+                        "carrier" + part + "-" + carrierPart.Material.Name,
+                        carrierPart.DrawVertices,
+                        carrierPart.Indices,
+                        written,
+                        camera);
+                    part++;
+                }
+            }
+            File.WriteAllText(path, text.ToString());
         }
 
         /// <summary>
@@ -1487,16 +1506,29 @@ namespace OpenClassic.XboxAvatar
             string name,
             AvatarDrawVertex[] vertices,
             short[] indices,
-            int alreadyWritten)
+            int alreadyWritten,
+            Matrix? camera)
         {
             text.Append("g ").Append(name).Append(Environment.NewLine);
             var culture = System.Globalization.CultureInfo.InvariantCulture;
             foreach (AvatarDrawVertex vertex in vertices)
             {
+                Vector3 position = vertex.Position;
+                if (camera.HasValue)
+                {
+                    // Perspective divide, so the dump is what reached the
+                    // screen rather than where it was in the world. Y is
+                    // negated because screen space counts downwards.
+                    Vector4 clip = Vector4.Transform(
+                        new Vector4(position, 1f), camera.Value);
+                    float w = Math.Abs(clip.W) < 1e-6f ? 1e-6f : clip.W;
+                    position = new Vector3(
+                        clip.X / w, -clip.Y / w, clip.Z / w);
+                }
                 text.Append("v ")
-                    .Append(vertex.Position.X.ToString("R", culture)).Append(' ')
-                    .Append(vertex.Position.Y.ToString("R", culture)).Append(' ')
-                    .Append(vertex.Position.Z.ToString("R", culture))
+                    .Append(position.X.ToString("R", culture)).Append(' ')
+                    .Append(position.Y.ToString("R", culture)).Append(' ')
+                    .Append(position.Z.ToString("R", culture))
                     .Append(Environment.NewLine);
             }
             for (int triangle = 0; triangle + 2 < indices.Length; triangle += 3)

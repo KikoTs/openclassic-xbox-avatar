@@ -96,7 +96,10 @@ internal static class AvatarRenderProbe
         // problems are.
         if (objPath != null)
         {
-            List<Triangle> objTriangles = LoadObj(objPath, onlyBatch);
+            List<Triangle> objTriangles = LoadObj(
+                objPath,
+                onlyBatch,
+                objPath.IndexOf("view", StringComparison.OrdinalIgnoreCase) >= 0);
             if (objTriangles.Count == 0)
             {
                 Console.Error.WriteLine("No triangles in " + objPath);
@@ -335,7 +338,14 @@ internal static class AvatarRenderProbe
     /// its own colour so the batches can be told apart on sight, which is what
     /// says whether a hole belongs to the glove, the skin or the sleeve.
     /// </summary>
-    private static List<Triangle> LoadObj(string path, string onlyGroup)
+    private static bool OffScreen(Vector3 p)
+    {
+        return Math.Abs(p.X) > 1.6f || Math.Abs(p.Y) > 1.6f ||
+            p.Z < -0.05f || p.Z > 1.05f;
+    }
+
+    private static List<Triangle> LoadObj(
+        string path, string onlyGroup, bool clip)
     {
         var positions = new List<Vector3>();
         var triangles = new List<Triangle>();
@@ -375,11 +385,21 @@ internal static class AvatarRenderProbe
                 continue;
             }
             if (parts[0] != "f" || parts.Length < 4 || !groupWanted) { continue; }
+            // A camera-space dump carries geometry behind the viewer too, whose
+            // coordinates run to enormous values and would stretch the framing
+            // until everything visible collapsed into one pixel. Keep what the
+            // screen would have kept.
             int a = int.Parse(parts[1].Split('/')[0], culture) - 1;
             int b = int.Parse(parts[2].Split('/')[0], culture) - 1;
             int c = int.Parse(parts[3].Split('/')[0], culture) - 1;
             if (a < 0 || b < 0 || c < 0 ||
                 a >= positions.Count || b >= positions.Count || c >= positions.Count)
+            {
+                continue;
+            }
+            if (clip && (OffScreen(positions[a]) ||
+                OffScreen(positions[b]) ||
+                OffScreen(positions[c])))
             {
                 continue;
             }
