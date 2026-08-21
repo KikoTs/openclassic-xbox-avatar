@@ -1247,11 +1247,7 @@ namespace OpenClassic.XboxAvatar
             bool meshHands = hands == ItemTuning.HandBuild.Mesh;
             foreach (AvatarBatch batch in _asset.Batches)
             {
-                short[] drawn = !meshHands
-                    ? batch.MappedFirstPersonIndices
-                    : (ItemTuning.KeepCoveredSkin
-                        ? batch.MappedFirstPersonSkinIndices
-                        : batch.MappedFirstPersonHandIndices);
+                short[] drawn = FirstPersonIndicesFor(batch, meshHands);
                 if (drawn != null && drawn.Length >= 3)
                 {
                     SkinBatch(batch, true);
@@ -1299,11 +1295,7 @@ namespace OpenClassic.XboxAvatar
                 // person uses; "carrier" rebuilds ProxyBoy's hand against it.
                 foreach (AvatarBatch batch in _asset.Batches)
                 {
-                    short[] indices = !meshHands
-                        ? batch.MappedFirstPersonIndices
-                        : (ItemTuning.KeepCoveredSkin
-                            ? batch.MappedFirstPersonSkinIndices
-                            : batch.MappedFirstPersonHandIndices);
+                    short[] indices = FirstPersonIndicesFor(batch, meshHands);
                     if (indices == null || indices.Length < 3)
                     {
                         continue;
@@ -1463,6 +1455,28 @@ namespace OpenClassic.XboxAvatar
         /// pixels across.
         /// </summary>
         /// <summary>
+        /// The triangles first person draws for one batch under the current
+        /// settings.
+        ///
+        /// Every place that needs this list - the skinning, the drawing, the
+        /// on-screen test and the dump - has to agree on it. They did not: the
+        /// dump kept reporting the selection the draw had stopped using, so a
+        /// switch that did change the picture looked like it had done nothing.
+        /// </summary>
+        private static short[] FirstPersonIndicesFor(
+            AvatarBatch batch,
+            bool meshHands)
+        {
+            if (!meshHands)
+            {
+                return batch.MappedFirstPersonIndices;
+            }
+            return ItemTuning.KeepCoveredSkin
+                ? batch.MappedFirstPersonSkinIndices
+                : batch.MappedFirstPersonHandIndices;
+        }
+
+        /// <summary>
         /// Whether any of the geometry this pass draws lands inside the
         /// viewing frustum. Tells the viewmodel pass apart from the world
         /// pass, which draws the same hand from a camera it sits behind.
@@ -1471,9 +1485,7 @@ namespace OpenClassic.XboxAvatar
         {
             foreach (AvatarBatch batch in _asset.Batches)
             {
-                short[] indices = meshHands
-                    ? batch.MappedFirstPersonHandIndices
-                    : batch.MappedFirstPersonIndices;
+                short[] indices = FirstPersonIndicesFor(batch, meshHands);
                 if (indices == null || indices.Length < 3)
                 {
                     continue;
@@ -1561,9 +1573,7 @@ namespace OpenClassic.XboxAvatar
 
             foreach (AvatarBatch batch in _asset.Batches)
             {
-                short[] indices = meshHands
-                    ? batch.MappedFirstPersonHandIndices
-                    : batch.MappedFirstPersonIndices;
+                short[] indices = FirstPersonIndicesFor(batch, meshHands);
                 if (indices == null || indices.Length < 3)
                 {
                     continue;
@@ -1712,6 +1722,29 @@ namespace OpenClassic.XboxAvatar
                     {
                         averageColor /= part.DrawVertices.Length;
                     }
+                    // Which avatar bones the first-person pose actually has a
+                    // bone to drive them with. Several avatar bones sharing
+                    // one proxy bone collapses everything weighted to them
+                    // into the same place, which is a degenerate triangle.
+                    var proxyUse = new Dictionary<int, int>();
+                    for (int bone = 0; bone < _proxyBoneByAvatar.Length; bone++)
+                    {
+                        int proxy = _proxyBoneByAvatar[bone];
+                        int already;
+                        proxyUse[proxy] = proxyUse.TryGetValue(proxy, out already)
+                            ? already + 1 : 1;
+                    }
+                    int shared = 0;
+                    foreach (KeyValuePair<int, int> pair in proxyUse)
+                    {
+                        if (pair.Value > 1) { shared += pair.Value; }
+                    }
+                    carrierStatus +=
+                        "avatarBones=" + _proxyBoneByAvatar.Length +
+                        " distinctProxyBones=" + proxyUse.Count +
+                        " avatarBonesSharingAProxyBone=" + shared +
+                        Environment.NewLine;
+
                     carrierStatus +=
                         _firstPersonBatches +
                         "carrierUnmorphed=" + _firstPersonCarrier.UnmorphedVertices +
