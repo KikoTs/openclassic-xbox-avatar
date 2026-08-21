@@ -3372,10 +3372,16 @@ namespace OpenClassic.XboxAvatar
                 {
                     continue;
                 }
-                // Any corner inside the hand volume means the hand set has
-                // this triangle too.
-                if (sides[index0] != 0 ||
-                    sides[index1] != 0 ||
+                // All three corners, matching what the hand set takes.
+                //
+                // Dropping a triangle with only one corner in the hand volume
+                // left it in neither set: the arm had discarded it and the
+                // hand set requires all three. That is a ring of missing
+                // triangles right where the hand meets the arm, and two arcs
+                // of that ring face the camera - the cutouts in the side of
+                // the glove. Only an exact duplicate is worth removing.
+                if (sides[index0] != 0 &&
+                    sides[index1] != 0 &&
                     sides[index2] != 0)
                 {
                     continue;
