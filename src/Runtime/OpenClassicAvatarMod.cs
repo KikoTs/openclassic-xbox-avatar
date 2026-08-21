@@ -3318,6 +3318,51 @@ namespace OpenClassic.XboxAvatar
         /// is precisely the case worth explaining. This one is written from
         /// the loader and cannot be silenced by whatever happens later.
         /// </summary>
+        /// <summary>
+        /// Drop from an arm selection every triangle the hand selection also
+        /// draws, so the two partition the limb instead of overlapping.
+        ///
+        /// The arm set stops short of the carrier's reach, 11 cm from the
+        /// wrist, while the hand volume extends to 22.5 cm. Everything in that
+        /// ring was in both sets, and the two are posed differently - the arm
+        /// by ordinary skinning, the hand by the first-person hand placement -
+        /// so each of those triangles was drawn twice, in two places. Two
+        /// copies of the same surface pulled apart is what put the flat wedges
+        /// down either side of the hand.
+        /// </summary>
+        private static short[] WithoutHandTriangles(short[] arm, byte[] sides)
+        {
+            if (arm == null || sides == null)
+            {
+                return arm ?? new short[0];
+            }
+            var result = new List<short>(arm.Length);
+            for (int triangle = 0; triangle + 2 < arm.Length; triangle += 3)
+            {
+                ushort index0 = (ushort)arm[triangle];
+                ushort index1 = (ushort)arm[triangle + 1];
+                ushort index2 = (ushort)arm[triangle + 2];
+                if (index0 >= sides.Length ||
+                    index1 >= sides.Length ||
+                    index2 >= sides.Length)
+                {
+                    continue;
+                }
+                // Any corner inside the hand volume means the hand set has
+                // this triangle too.
+                if (sides[index0] != 0 ||
+                    sides[index1] != 0 ||
+                    sides[index2] != 0)
+                {
+                    continue;
+                }
+                result.Add(arm[triangle]);
+                result.Add(arm[triangle + 1]);
+                result.Add(arm[triangle + 2]);
+            }
+            return result.ToArray();
+        }
+
         private static short[] ConcatenateIndices(short[] first, short[] second)
         {
             int firstCount = first == null ? 0 : first.Length;
@@ -3554,7 +3599,9 @@ namespace OpenClassic.XboxAvatar
                 foreach (AvatarBatch batch in asset.Batches)
                 {
                     batch.MappedFirstPersonHandIndices = ConcatenateIndices(
-                        batch.MappedFirstPersonIndices,
+                        WithoutHandTriangles(
+                            batch.MappedFirstPersonIndices,
+                            batch.FirstPersonSides),
                         batch.FirstPersonIndices);
                 }
 
