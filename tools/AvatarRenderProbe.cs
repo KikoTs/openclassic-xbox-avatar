@@ -69,6 +69,7 @@ internal static class AvatarRenderProbe
         bool markers = false;
         float buildScale = 1f;
         string selection = "thirdperson";
+        string objPath = null;
 
         for (int i = 4; i < args.Length - 1; i++)
         {
@@ -85,6 +86,30 @@ internal static class AvatarRenderProbe
             else if (option == "--markers") { markers = args[i + 1] == "1"; }
             else if (option == "--scale") { buildScale = float.Parse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture); }
             else if (option == "--selection") { selection = args[i + 1].ToLowerInvariant(); }
+            else if (option == "--obj") { objPath = args[i + 1]; }
+        }
+
+        // --obj renders a mesh the runtime dumped as it drew it - posed, in
+        // world space - rather than the asset in bind pose. That is the only
+        // way to see a fault that lives in the posing rather than in the
+        // selection, which is where the first-person hand's remaining
+        // problems are.
+        if (objPath != null)
+        {
+            List<Triangle> objTriangles = LoadObj(objPath, onlyBatch);
+            if (objTriangles.Count == 0)
+            {
+                Console.Error.WriteLine("No triangles in " + objPath);
+                return 1;
+            }
+            Render(
+                objTriangles, args[3], address, alphaCut, view, zoom, size,
+                new List<KeyValuePair<Vector3, Color>>());
+            Console.WriteLine(
+                "wrote " + args[3] +
+                " triangles=" + objTriangles.Count +
+                " from " + objPath + " view=" + view);
+            return 0;
         }
 
         Assembly mod = Assembly.LoadFrom(Path.GetFullPath(args[0]));
@@ -303,6 +328,73 @@ internal static class AvatarRenderProbe
             " alphacut=" + alphaCut +
             " view=" + view + " zoom=" + zoom);
         return 0;
+    }
+
+    /// <summary>
+    /// Read a Wavefront OBJ the runtime wrote while drawing. Each group gets
+    /// its own colour so the batches can be told apart on sight, which is what
+    /// says whether a hole belongs to the glove, the skin or the sleeve.
+    /// </summary>
+    private static List<Triangle> LoadObj(string path, string onlyGroup)
+    {
+        var positions = new List<Vector3>();
+        var triangles = new List<Triangle>();
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        Color[] palette =
+        {
+            Color.FromArgb(220, 90, 90), Color.FromArgb(90, 170, 220),
+            Color.FromArgb(120, 200, 120), Color.FromArgb(230, 190, 90),
+            Color.FromArgb(190, 120, 210), Color.FromArgb(120, 210, 200),
+            Color.FromArgb(230, 140, 190), Color.FromArgb(170, 170, 170),
+        };
+        string group = "";
+        int groupIndex = -1;
+        bool groupWanted = true;
+
+        foreach (string raw in File.ReadAllLines(path))
+        {
+            string line = raw.Trim();
+            if (line.Length == 0 || line[0] == '#') { continue; }
+            string[] parts = line.Split(
+                new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts[0] == "g" && parts.Length >= 2)
+            {
+                group = parts[1];
+                groupIndex++;
+                groupWanted = onlyGroup == null ||
+                    group.IndexOf(onlyGroup, StringComparison.OrdinalIgnoreCase) >= 0;
+                Console.WriteLine("group " + group);
+                continue;
+            }
+            if (parts[0] == "v" && parts.Length >= 4)
+            {
+                positions.Add(new Vector3(
+                    float.Parse(parts[1], culture),
+                    float.Parse(parts[2], culture),
+                    float.Parse(parts[3], culture)));
+                continue;
+            }
+            if (parts[0] != "f" || parts.Length < 4 || !groupWanted) { continue; }
+            int a = int.Parse(parts[1].Split('/')[0], culture) - 1;
+            int b = int.Parse(parts[2].Split('/')[0], culture) - 1;
+            int c = int.Parse(parts[3].Split('/')[0], culture) - 1;
+            if (a < 0 || b < 0 || c < 0 ||
+                a >= positions.Count || b >= positions.Count || c >= positions.Count)
+            {
+                continue;
+            }
+            triangles.Add(new Triangle
+            {
+                A = positions[a],
+                B = positions[b],
+                C = positions[c],
+                Texture = null,
+                Batch = group,
+                Diffuse = palette[Math.Max(groupIndex, 0) % palette.Length],
+                IsFaceLayer = false,
+            });
+        }
+        return triangles;
     }
 
     private struct Triangle

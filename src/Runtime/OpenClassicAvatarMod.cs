@@ -1395,6 +1395,7 @@ namespace OpenClassic.XboxAvatar
                         renderedTriangles,
                         view,
                         projection);
+                    DumpFirstPersonMesh(meshHands, hands);
                     _firstPersonLogged = true;
                 }
             }
@@ -1405,6 +1406,108 @@ namespace OpenClassic.XboxAvatar
                 device.RasterizerState = oldRasterizer;
                 device.SamplerStates[0] = oldSampler;
             }
+        }
+
+        /// <summary>
+        /// Write the first-person hand exactly as it was drawn - posed, in
+        /// world space - as a Wavefront OBJ.
+        ///
+        /// The offline probe can rasterise the avatar, but only in bind pose,
+        /// so it can prove which triangles are selected and nothing about how
+        /// they are placed. Everything still wrong with the hand is in the
+        /// placement. This dumps the vertices the GPU actually received, so
+        /// the drawn result can be measured and rendered away from the game
+        /// instead of being judged from a screenshot of a hand a hundred
+        /// pixels across.
+        /// </summary>
+        private void DumpFirstPersonMesh(
+            bool meshHands,
+            ItemTuning.HandBuild build)
+        {
+            try
+            {
+                var text = new System.Text.StringBuilder();
+                text.Append("# first-person hand as drawn, build=")
+                    .Append(build.ToString().ToLowerInvariant())
+                    .Append(Environment.NewLine);
+                int written = 0;
+
+                foreach (AvatarBatch batch in _asset.Batches)
+                {
+                    short[] indices = meshHands
+                        ? batch.MappedFirstPersonHandIndices
+                        : batch.MappedFirstPersonIndices;
+                    if (indices == null || indices.Length < 3)
+                    {
+                        continue;
+                    }
+                    written += AppendObjGroup(
+                        text,
+                        batch.Name,
+                        batch.DrawVertices,
+                        indices,
+                        written);
+                }
+
+                if (!meshHands)
+                {
+                    int part = 0;
+                    foreach (ProxyHandCarrierPart carrierPart in
+                        _firstPersonCarrier.Parts)
+                    {
+                        written += AppendObjGroup(
+                            text,
+                            "carrier" + part + "-" + carrierPart.Material.Name,
+                            carrierPart.DrawVertices,
+                            carrierPart.Indices,
+                            written);
+                        part++;
+                    }
+                }
+
+                string folder = Branding.AvatarFolder(
+                    AppDomain.CurrentDomain.BaseDirectory);
+                Directory.CreateDirectory(folder);
+                File.WriteAllText(
+                    Path.Combine(folder, "first-person-mesh.obj"),
+                    text.ToString());
+            }
+            catch (Exception exception)
+            {
+                WriteFailure(exception);
+            }
+        }
+
+        /// <summary>
+        /// One OBJ group. Returns how many vertices it wrote, because OBJ face
+        /// indices are one-based and run across the whole file.
+        /// </summary>
+        private static int AppendObjGroup(
+            System.Text.StringBuilder text,
+            string name,
+            AvatarDrawVertex[] vertices,
+            short[] indices,
+            int alreadyWritten)
+        {
+            text.Append("g ").Append(name).Append(Environment.NewLine);
+            var culture = System.Globalization.CultureInfo.InvariantCulture;
+            foreach (AvatarDrawVertex vertex in vertices)
+            {
+                text.Append("v ")
+                    .Append(vertex.Position.X.ToString("R", culture)).Append(' ')
+                    .Append(vertex.Position.Y.ToString("R", culture)).Append(' ')
+                    .Append(vertex.Position.Z.ToString("R", culture))
+                    .Append(Environment.NewLine);
+            }
+            for (int triangle = 0; triangle + 2 < indices.Length; triangle += 3)
+            {
+                text.Append("f ")
+                    .Append(alreadyWritten + (ushort)indices[triangle] + 1).Append(' ')
+                    .Append(alreadyWritten + (ushort)indices[triangle + 1] + 1).Append(' ')
+                    .Append(alreadyWritten + (ushort)indices[triangle + 2] + 1)
+                    .Append(Environment.NewLine);
+            }
+            return vertices.Length;
         }
 
         private void WriteMappedFirstPersonStatus(
@@ -3481,6 +3584,34 @@ namespace OpenClassic.XboxAvatar
                 lines.Add("bareHandShell=" + (asset.BareHandShell == null
                     ? "none" : asset.BareHandShell.Name));
                 lines.Add("outerHandBatches=" + asset.OuterHandBatches.Count);
+
+                // Every bone's first-person scale. This multiplies the bone's
+                // transform when the hand is skinned, so a bone that has
+                // collapsed to nearly nothing takes its vertices with it and
+                // bites a piece out of the surface - a fault in the posing
+                // that no amount of checking the selection would ever find.
+                lines.Add("");
+                lines.Add("first-person bone scales (suspicious ones marked):");
+                if (asset.FirstPersonBoneScale != null)
+                {
+                    for (int bone = 0; bone < asset.FirstPersonBoneScale.Length; bone++)
+                    {
+                        Vector3 scale = asset.FirstPersonBoneScale[bone];
+                        float smallest = Math.Min(scale.X, Math.Min(scale.Y, scale.Z));
+                        float largest = Math.Max(scale.X, Math.Max(scale.Y, scale.Z));
+                        bool suspicious = smallest < 0.25f || largest > 4f ||
+                            float.IsNaN(smallest) || float.IsNaN(largest);
+                        if (!suspicious)
+                        {
+                            continue;
+                        }
+                        lines.Add(
+                            "  bone " + bone.ToString().PadLeft(2) +
+                            " " + ((AvatarBone)bone).ToString().PadRight(22) +
+                            " scale=" + scale +
+                            "  <-- collapsed or exploded");
+                    }
+                }
                 string folder = Branding.AvatarFolder(
                     AppDomain.CurrentDomain.BaseDirectory);
                 Directory.CreateDirectory(folder);
@@ -3656,6 +3787,28 @@ namespace OpenClassic.XboxAvatar
                     }
                     asset.BaseBodyBatch.RemoveCoveredThirdPersonHandGeometry(
                         outerHands);
+
+                    // The body is not one layer but three - the skin and the
+                    // overlay passes that colour it - over identical geometry.
+                    // Only the layer chosen as the skin was told which of its
+                    // triangles a glove covers, so the other two carried on
+                    // drawing the hand underneath the garment, and the skin's
+                    // own colour passes were painted straight over the glove.
+                    // That reads as holes in the glove rather than as skin on
+                    // top of it, which is what it is.
+                    foreach (AvatarBatch layer in asset.Batches)
+                    {
+                        if (layer != asset.BaseBodyBatch &&
+                            layer.IsBaseBody &&
+                            layer.SourceVertices != null &&
+                            asset.BaseBodyBatch.SourceVertices != null &&
+                            layer.SourceVertices.Length ==
+                                asset.BaseBodyBatch.SourceVertices.Length)
+                        {
+                            layer.CoveredByOuterHand =
+                                asset.BaseBodyBatch.CoveredByOuterHand;
+                        }
+                    }
                 }
                 // What "hands mesh" draws: the arm this batch already
                 // contributes, plus the avatar's own hand.
