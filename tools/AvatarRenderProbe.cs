@@ -340,7 +340,7 @@ internal static class AvatarRenderProbe
     /// </summary>
     private static bool OffScreen(Vector3 p)
     {
-        return Math.Abs(p.X) > 1.6f || Math.Abs(p.Y) > 1.6f ||
+        return Math.Abs(p.X) > 6f || Math.Abs(p.Y) > 6f ||
             p.Z < -0.05f || p.Z > 1.05f;
     }
 
@@ -397,9 +397,11 @@ internal static class AvatarRenderProbe
             {
                 continue;
             }
-            if (clip && (OffScreen(positions[a]) ||
-                OffScreen(positions[b]) ||
-                OffScreen(positions[c])))
+            // Judge the triangle by its middle. Rejecting one whose corner
+            // strays off screen throws away most of a hand that reaches the
+            // edge of the frame, which is exactly what a first-person hand
+            // does.
+            if (clip && OffScreen((positions[a] + positions[b] + positions[c]) / 3f))
             {
                 continue;
             }

@@ -102,6 +102,13 @@ namespace OpenClassic.XboxAvatar
         private static Placement _mode = Placement.Hand;
         private static Vector3 _global;
         private static bool _handSpace = true;
+
+        /// <summary>
+        /// Whether first person keeps the skin an equipped glove covers. A
+        /// fingerless glove needs it, because its openings are meant to show
+        /// skin; a full glove does not, because the skin would fight it.
+        /// </summary>
+        private static bool _keepCoveredSkin;
         /// <summary>
         /// How the first-person hand is built.
         ///
@@ -175,6 +182,16 @@ namespace OpenClassic.XboxAvatar
         /// pitch; in avatar space the same value drifts as the arm swings,
         /// which is what "it changes when I look up" was.
         /// </summary>
+        /// <summary>Whether to keep the skin a glove covers.</summary>
+        internal static bool KeepCoveredSkin
+        {
+            get
+            {
+                Refresh();
+                return _keepCoveredSkin;
+            }
+        }
+
         internal static bool NudgeInHandSpace
         {
             get
@@ -203,6 +220,7 @@ namespace OpenClassic.XboxAvatar
             text.Append("mode=").Append(_mode.ToString().ToLowerInvariant());
             text.Append(" hands=").Append(_hands.ToString().ToLowerInvariant());
             text.Append(" space=").Append(_handSpace ? "hand" : "avatar");
+            text.Append(" skin=").Append(_keepCoveredSkin ? "full" : "covered");
             text.Append(" offset=").Append(_global);
             foreach (KeyValuePair<string, Vector3> item in Items)
             {
@@ -313,6 +331,7 @@ namespace OpenClassic.XboxAvatar
             _mode = Placement.Hand;
             _global = Vector3.Zero;
             _handSpace = true;
+            _keepCoveredSkin = false;
             _hands = HandBuild.Mesh;
             foreach (string raw in lines)
             {
@@ -370,6 +389,14 @@ namespace OpenClassic.XboxAvatar
                     {
                         // Unrecognised name keeps the current build.
                     }
+                    continue;
+                }
+
+                if (string.Equals(parts[0], "skin",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    _keepCoveredSkin = string.Equals(parts[1], "full",
+                        StringComparison.OrdinalIgnoreCase);
                     continue;
                 }
 
@@ -1220,9 +1247,11 @@ namespace OpenClassic.XboxAvatar
             bool meshHands = hands == ItemTuning.HandBuild.Mesh;
             foreach (AvatarBatch batch in _asset.Batches)
             {
-                short[] drawn = meshHands
-                    ? batch.MappedFirstPersonHandIndices
-                    : batch.MappedFirstPersonIndices;
+                short[] drawn = !meshHands
+                    ? batch.MappedFirstPersonIndices
+                    : (ItemTuning.KeepCoveredSkin
+                        ? batch.MappedFirstPersonSkinIndices
+                        : batch.MappedFirstPersonHandIndices);
                 if (drawn != null && drawn.Length >= 3)
                 {
                     SkinBatch(batch, true);
@@ -1270,9 +1299,11 @@ namespace OpenClassic.XboxAvatar
                 // person uses; "carrier" rebuilds ProxyBoy's hand against it.
                 foreach (AvatarBatch batch in _asset.Batches)
                 {
-                    short[] indices = meshHands
-                        ? batch.MappedFirstPersonHandIndices
-                        : batch.MappedFirstPersonIndices;
+                    short[] indices = !meshHands
+                        ? batch.MappedFirstPersonIndices
+                        : (ItemTuning.KeepCoveredSkin
+                            ? batch.MappedFirstPersonSkinIndices
+                            : batch.MappedFirstPersonHandIndices);
                     if (indices == null || indices.Length < 3)
                     {
                         continue;
@@ -1388,7 +1419,18 @@ namespace OpenClassic.XboxAvatar
                     }
                 }
 
-                if (!_firstPersonLogged)
+                // Report the pass the player actually sees.
+                //
+                // The hand is drawn twice a frame: once in the world view,
+                // where the local player's own hands sit at or behind the
+                // camera and contribute nothing, and once through the
+                // viewmodel camera the game keeps for first person. Reporting
+                // the first draw meant reporting the world pass, whose numbers
+                // are meaningless here - not one vertex inside the frustum,
+                // and an ndc line running to five figures. Every conclusion
+                // drawn about where this hand ends up came from that pass.
+                if (!_firstPersonLogged &&
+                    AnyVertexOnScreen(view * projection, meshHands))
                 {
                     WriteMappedFirstPersonStatus(
                         renderedBatches,
@@ -1420,6 +1462,59 @@ namespace OpenClassic.XboxAvatar
         /// instead of being judged from a screenshot of a hand a hundred
         /// pixels across.
         /// </summary>
+        /// <summary>
+        /// Whether any of the geometry this pass draws lands inside the
+        /// viewing frustum. Tells the viewmodel pass apart from the world
+        /// pass, which draws the same hand from a camera it sits behind.
+        /// </summary>
+        private bool AnyVertexOnScreen(Matrix camera, bool meshHands)
+        {
+            foreach (AvatarBatch batch in _asset.Batches)
+            {
+                short[] indices = meshHands
+                    ? batch.MappedFirstPersonHandIndices
+                    : batch.MappedFirstPersonIndices;
+                if (indices == null || indices.Length < 3)
+                {
+                    continue;
+                }
+                foreach (short index in indices)
+                {
+                    Vector4 clip = Vector4.Transform(
+                        new Vector4(
+                            batch.DrawVertices[(ushort)index].Position, 1f),
+                        camera);
+                    if (clip.W > 0.0001f &&
+                        Math.Abs(clip.X) <= clip.W &&
+                        Math.Abs(clip.Y) <= clip.W &&
+                        clip.Z >= 0f && clip.Z <= clip.W)
+                    {
+                        return true;
+                    }
+                }
+            }
+            if (meshHands || _firstPersonCarrier == null)
+            {
+                return false;
+            }
+            foreach (ProxyHandCarrierPart part in _firstPersonCarrier.Parts)
+            {
+                foreach (AvatarDrawVertex vertex in part.DrawVertices)
+                {
+                    Vector4 clip = Vector4.Transform(
+                        new Vector4(vertex.Position, 1f), camera);
+                    if (clip.W > 0.0001f &&
+                        Math.Abs(clip.X) <= clip.W &&
+                        Math.Abs(clip.Y) <= clip.W &&
+                        clip.Z >= 0f && clip.Z <= clip.W)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
         private void DumpFirstPersonMesh(
             bool meshHands,
             ItemTuning.HandBuild build,
@@ -3856,6 +3951,16 @@ namespace OpenClassic.XboxAvatar
                 // carrier was standing in for.
                 foreach (AvatarBatch batch in asset.Batches)
                 {
+                    // Keep the skin the glove's openings expose.
+                    //
+                    // A fingerless glove is mostly holes, and the skin behind
+                    // one is the whole point of it. Removing every triangle a
+                    // glove triangle passes within 12 mm of takes the skin
+                    // around each opening with it, and the opening then shows
+                    // the world through the hand. The overlap that removal
+                    // exists to prevent is skin poking through the garment,
+                    // which the depth buffer already settles when the two are
+                    // this close.
                     batch.MappedFirstPersonHandIndices = ConcatenateIndices(
                         WithoutHandTriangles(
                             batch.MappedFirstPersonIndices,
@@ -3863,6 +3968,11 @@ namespace OpenClassic.XboxAvatar
                         WithoutCoveredTriangles(
                             batch.FirstPersonIndices,
                             batch.CoveredByOuterHand));
+                    batch.MappedFirstPersonSkinIndices = ConcatenateIndices(
+                        WithoutHandTriangles(
+                            batch.MappedFirstPersonIndices,
+                            batch.FirstPersonSides),
+                        batch.FirstPersonIndices);
                 }
 
                 WriteHandGeometryReport(asset);
@@ -4098,6 +4208,16 @@ namespace OpenClassic.XboxAvatar
         /// runtime and the two compared.
         /// </summary>
         internal short[] MappedFirstPersonHandIndices;
+
+        /// <summary>
+        /// The same selection with the skin a glove covers left in.
+        ///
+        /// A fingerless glove is mostly openings, and the skin behind one is
+        /// the point of it. Whether removing that skin closes an overlap or
+        /// opens a hole depends on the garment, so both answers are kept and
+        /// the tuning file chooses.
+        /// </summary>
+        internal short[] MappedFirstPersonSkinIndices;
         internal byte[] FirstPersonSides;
         internal bool[] FirstPersonUsed;
 
