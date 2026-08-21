@@ -121,9 +121,21 @@ namespace OpenClassic.XboxAvatar
             /// </summary>
             Carrier,
             /// <summary>
-            /// The game's hand, unmoved, in the avatar's colour. Cannot tear,
-            /// because no vertex moves; the shape is the game's rather than
-            /// the avatar's.
+            /// The game's hand, unmoved, wearing the avatar's textures.
+            ///
+            /// Takes the half of the carrier that works - deciding, per
+            /// triangle, which of the avatar's materials covers it, and
+            /// carrying that material's texture and coordinates across - and
+            /// drops the half that does not, which is moving the vertices.
+            /// A fingerless glove therefore comes out gloved across the palm
+            /// and bare on the fingers, with the garment's own detail on it,
+            /// and nothing can tear because nothing moves.
+            /// </summary>
+            Hybrid,
+            /// <summary>
+            /// The game's hand, unmoved, in one flat colour per material.
+            /// Cannot tear either, but loses the texture with it, so the hand
+            /// reads as untextured.
             /// </summary>
             Tinted,
             /// <summary>
@@ -134,7 +146,7 @@ namespace OpenClassic.XboxAvatar
             Mesh,
         }
 
-        private static HandBuild _hands = HandBuild.Carrier;
+        private static HandBuild _hands = HandBuild.Hybrid;
 
         internal static HandBuild Hands
         {
@@ -301,7 +313,7 @@ namespace OpenClassic.XboxAvatar
             _mode = Placement.Hand;
             _global = Vector3.Zero;
             _handSpace = true;
-            _hands = HandBuild.Carrier;
+            _hands = HandBuild.Hybrid;
             foreach (string raw in lines)
             {
                 string line = raw.Trim();
@@ -491,10 +503,24 @@ namespace OpenClassic.XboxAvatar
                 "# looks wrong in first person but right in third comes from",
                 "# that rebuild.",
                 "#",
-                "#     hands carrier   rebuild the game's hand   (default)",
-                "#     hands mesh      draw your avatar's hand, as third person does",
+                "#     hands hybrid    the game's hand, your textures  (default)",
+                "#     hands tinted    the game's hand, one flat colour per material",
+                "#     hands carrier   the game's hand pulled onto your surface",
+                "#     hands mesh      your own hand, as third person draws it",
+                "#",
+                "# 'hybrid' keeps the game's hand shape and dresses it in your",
+                "# avatar's materials, deciding per triangle which one covers",
+                "# it - so a fingerless glove comes out gloved across the palm",
+                "# and bare on the fingers, with the garment's own texture on",
+                "# it. Nothing moves, so it cannot tear.",
+                "#",
+                "# 'tinted' is the same without the textures, one flat colour",
+                "# per material. 'carrier' pulls the shape onto your avatar's",
+                "# as well, closer when it works and torn when it does not.",
+                "# 'mesh' draws your own hand, whose fingers come apart in the",
+                "# pose used to hold an item - which is why the others exist.",
                 "",
-                "hands carrier",
+                "hands hybrid",
                 "",
                 "# 3. Per-item nudges, on top of the one above, for when one",
                 "# item still sits differently from the rest. The name is the",
@@ -2397,9 +2423,13 @@ namespace OpenClassic.XboxAvatar
                     worldBoneTransforms[proxyBone];
             }
 
-            // "tinted" skins the game's own untouched hand, so nothing can be
-            // torn by a projection; only the colour comes from the avatar.
-            bool stockShape = ItemTuning.Hands == ItemTuning.HandBuild.Tinted;
+            // Both of these skin the game's own untouched hand, so no
+            // projection can tear it; they differ only in how much of the
+            // avatar's material they then carry across.
+            ItemTuning.HandBuild build = ItemTuning.Hands;
+            bool stockShape =
+                build == ItemTuning.HandBuild.Tinted ||
+                build == ItemTuning.HandBuild.Hybrid;
 
             foreach (ProxyHandCarrierPart part in Parts)
             {
@@ -2538,19 +2568,15 @@ namespace OpenClassic.XboxAvatar
                 return best;
             }
 
-            // No glove triangle to project onto, but the hand is still gloved.
+            // No glove triangle fits, so this part of the hand is not gloved.
             //
-            // Falling through to the base body here put bare skin on a handful
-            // of triangles - 60 of 789 on a black glove - and projected them
-            // onto body geometry the glove is covering, which is the detached
-            // skin-coloured fragments that appear to float above a gloved hand
-            // in first person. Stay on the garment: the nearest outer-hand
-            // batch is wrong by a few millimetres, the body is wrong by a whole
-            // material.
-            if (asset.OuterHandBatches.Count > 0)
-            {
-                return asset.OuterHandBatches[0];
-            }
+            // Forcing it onto the garment anyway was a mistake: gloves are
+            // frequently fingerless, and the triangles that fail to find glove
+            // to sit on are exactly the bare fingers sticking out of one. On
+            // such a hand 60 of 789 triangles belong to the body, and painting
+            // them with the glove is what turns bare fingers into glove-
+            // coloured ones. The split between the two materials is the
+            // fingerless glove.
             return asset.BaseBodyBatch ?? asset.BareHandShell;
         }
 
