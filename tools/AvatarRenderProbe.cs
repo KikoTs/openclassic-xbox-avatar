@@ -68,6 +68,7 @@ internal static class AvatarRenderProbe
         bool flipV = false;
         bool markers = false;
         float buildScale = 1f;
+        string selection = "thirdperson";
 
         for (int i = 4; i < args.Length - 1; i++)
         {
@@ -83,6 +84,7 @@ internal static class AvatarRenderProbe
             else if (option == "--flipv") { flipV = args[i + 1] == "1"; }
             else if (option == "--markers") { markers = args[i + 1] == "1"; }
             else if (option == "--scale") { buildScale = float.Parse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture); }
+            else if (option == "--selection") { selection = args[i + 1].ToLowerInvariant(); }
         }
 
         Assembly mod = Assembly.LoadFrom(Path.GetFullPath(args[0]));
@@ -167,8 +169,19 @@ internal static class AvatarRenderProbe
                 continue;
             }
 
-            short[] indices = (short[])Field(batchType, batch, "ThirdPersonIndices");
-            if (indices == null || indices.Length < 3)
+            // --selection firstperson rasterises exactly the triangles first
+            // person draws, in bind pose. First-person faults have had to be
+            // chased by launching the game and squinting at a hand a hundred
+            // pixels across; this puts the same geometry in a PNG that can be
+            // looked at directly, and tells a hole in the selection apart from
+            // a hole made by posing or by depth.
+            string selectionField =
+                selection == "firstperson" ? "MappedFirstPersonHandIndices" :
+                selection == "handvolume" ? "FirstPersonIndices" : null;
+            short[] indices = selectionField != null
+                ? (short[])Field(batchType, batch, selectionField)
+                : (short[])Field(batchType, batch, "ThirdPersonIndices");
+            if (selectionField == null && (indices == null || indices.Length < 3))
             {
                 indices = (short[])Field(batchType, batch, "Indices");
             }
