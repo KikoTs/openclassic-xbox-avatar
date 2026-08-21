@@ -3363,6 +3363,49 @@ namespace OpenClassic.XboxAvatar
             return result.ToArray();
         }
 
+        /// <summary>
+        /// Drop the bare-skin triangles an equipped glove is sitting on.
+        ///
+        /// Third person already does this; first person drew its own selection
+        /// and kept them, so the skin under a glove was rendered as well as
+        /// the glove itself, in the same place. Which of the two won came down
+        /// to the depth buffer, and where the skin won the glove appeared to
+        /// have holes in it - around the thumb and below the little finger on
+        /// the outfit this was found on.
+        ///
+        /// Only whole covered triangles go: one covered corner on a triangle
+        /// that reaches out from under the glove is the seam where skin meets
+        /// garment, and removing those would open a gap instead of closing
+        /// one.
+        /// </summary>
+        private static short[] WithoutCoveredTriangles(
+            short[] indices,
+            bool[] covered)
+        {
+            if (indices == null || covered == null)
+            {
+                return indices ?? new short[0];
+            }
+            var result = new List<short>(indices.Length);
+            for (int triangle = 0; triangle + 2 < indices.Length; triangle += 3)
+            {
+                ushort index0 = (ushort)indices[triangle];
+                ushort index1 = (ushort)indices[triangle + 1];
+                ushort index2 = (ushort)indices[triangle + 2];
+                if (index0 < covered.Length &&
+                    index1 < covered.Length &&
+                    index2 < covered.Length &&
+                    covered[index0] && covered[index1] && covered[index2])
+                {
+                    continue;
+                }
+                result.Add(indices[triangle]);
+                result.Add(indices[triangle + 1]);
+                result.Add(indices[triangle + 2]);
+            }
+            return result.ToArray();
+        }
+
         private static short[] ConcatenateIndices(short[] first, short[] second)
         {
             int firstCount = first == null ? 0 : first.Length;
@@ -3602,7 +3645,9 @@ namespace OpenClassic.XboxAvatar
                         WithoutHandTriangles(
                             batch.MappedFirstPersonIndices,
                             batch.FirstPersonSides),
-                        batch.FirstPersonIndices);
+                        WithoutCoveredTriangles(
+                            batch.FirstPersonIndices,
+                            batch.CoveredByOuterHand));
                 }
 
                 WriteHandGeometryReport(asset);
@@ -3849,6 +3894,13 @@ namespace OpenClassic.XboxAvatar
         /// with.
         /// </summary>
         internal float[] WristDistance;
+
+        /// <summary>
+        /// Which of this batch's vertices an equipped glove sits on top of.
+        /// Only meaningful on the base body, and only once the outer hands
+        /// have been matched against it.
+        /// </summary>
+        internal bool[] CoveredByOuterHand;
 
         /// <summary>
         /// How far from the wrist the first-person carrier reaches. Anything
@@ -4131,6 +4183,13 @@ namespace OpenClassic.XboxAvatar
                 visible.Add(index2);
             }
             ThirdPersonIndices = visible.ToArray();
+
+            // First person needs the same answer. It draws its own selection,
+            // which still contained every triangle removed here, so skin and
+            // glove ended up occupying the same space and fighting over the
+            // depth buffer - and where the skin won, the glove looked as
+            // though pieces of it were missing.
+            CoveredByOuterHand = covered;
         }
 
         private static Vector3 ClosestPointOnTriangle(
