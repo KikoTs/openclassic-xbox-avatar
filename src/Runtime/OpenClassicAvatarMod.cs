@@ -335,9 +335,13 @@ namespace OpenClassic.XboxAvatar
                 {
                     return;
                 }
+                // Read before recording the stamp: an editor still holding the
+                // file mid-save makes the read throw, and recording first
+                // would mean that edit is never picked up until the file is
+                // touched again.
+                Parse(File.ReadAllLines(path));
                 _stampUtc = stamp;
                 _loaded = true;
-                Parse(File.ReadAllLines(path));
             }
             catch
             {
@@ -1417,6 +1421,11 @@ namespace OpenClassic.XboxAvatar
                 ItemTuning.Grip,
                 _avatarSkinTransforms,
                 _firstPersonLiveBones);
+            // The batch list is for this frame's report only. It is appended
+            // to below until the report is written, and the report waits for
+            // a frame whose hand is on screen - which, with the weapon lowered
+            // or off to the side, can be a long time coming.
+            _firstPersonBatches = string.Empty;
             // Skin whatever this hand build is going to draw, which is not
             // always what the carrier build draws.
             //
@@ -2209,30 +2218,42 @@ namespace OpenClassic.XboxAvatar
         /// </summary>
         internal void ReleaseGraphicsResources()
         {
-            try
+            // One resource refusing to go must not keep the rest alive, so
+            // each is released on its own and never lets tidying up take the
+            // game down with it.
+            if (_effect != null)
             {
-                if (_effect != null)
+                BasicEffect effect = _effect;
+                _effect = null;
+                try
                 {
-                    _effect.Dispose();
-                    _effect = null;
+                    effect.Dispose();
                 }
-                if (_asset == null || _asset.Batches == null)
+                catch (Exception exception)
                 {
-                    return;
-                }
-                foreach (AvatarBatch batch in _asset.Batches)
-                {
-                    if (batch != null && batch.Texture != null)
-                    {
-                        batch.Texture.Dispose();
-                        batch.Texture = null;
-                    }
+                    WriteFailure(exception);
                 }
             }
-            catch (Exception exception)
+            if (_asset == null || _asset.Batches == null)
             {
-                // Never let tidying up take the game down with it.
-                WriteFailure(exception);
+                return;
+            }
+            foreach (AvatarBatch batch in _asset.Batches)
+            {
+                if (batch == null || batch.Texture == null)
+                {
+                    continue;
+                }
+                Texture2D texture = batch.Texture;
+                batch.Texture = null;
+                try
+                {
+                    texture.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    WriteFailure(exception);
+                }
             }
         }
 
@@ -2528,15 +2549,53 @@ namespace OpenClassic.XboxAvatar
         }
 #endif
 
+        /// <summary>
+        /// How many times each distinct failure has been logged. Several
+        /// callers sit on per-frame paths - the held-item anchor runs in every
+        /// avatar update - so a fault that recurs every frame would otherwise
+        /// append a stack trace sixty times a second for as long as the
+        /// session lasts, and fill the disk. Each distinct failure is written
+        /// a few times in full, then counted.
+        /// </summary>
+        private static readonly Dictionary<string, int> FailureCounts =
+            new Dictionary<string, int>();
+        private const int FullFailureReports = 3;
+        private const long FailureLogLimit = 4L * 1024 * 1024;
+
         internal static void WriteFailure(Exception exception)
         {
             try
             {
+                string key = exception == null
+                    ? "null"
+                    : exception.GetType().FullName + ": " + exception.Message;
+                int seen;
+                lock (FailureCounts)
+                {
+                    FailureCounts.TryGetValue(key, out seen);
+                    FailureCounts[key] = seen + 1;
+                }
+                // Full reports for the first few, then a line at each power of
+                // two so a recurring fault stays visible without growing.
+                if (seen >= FullFailureReports && (seen & (seen - 1)) != 0)
+                {
+                    return;
+                }
+
                 string folder = Branding.AvatarFolder(AppDomain.CurrentDomain.BaseDirectory);
                 Directory.CreateDirectory(folder);
+                string path = Path.Combine(folder, "renderer.log");
+                var file = new FileInfo(path);
+                if (file.Exists && file.Length > FailureLogLimit)
+                {
+                    return;
+                }
+                string text = seen < FullFailureReports
+                    ? exception.ToString()
+                    : "(" + (seen + 1) + " times) " + key;
                 File.AppendAllText(
-                    Path.Combine(folder, "renderer.log"),
-                    DateTime.Now.ToString("s") + " " + exception + Environment.NewLine);
+                    path,
+                    DateTime.Now.ToString("s") + " " + text + Environment.NewLine);
             }
             catch
             {
@@ -2558,6 +2617,7 @@ namespace OpenClassic.XboxAvatar
 
         private readonly Matrix[] _inverseBindPose;
         private readonly int[] _avatarBoneByProxy;
+        private Matrix[] _skinTransforms;
 
         internal ProxyHandCarrierPart[] Parts;
 
@@ -2885,7 +2945,15 @@ namespace OpenClassic.XboxAvatar
             Matrix[] worldBoneTransforms,
             Vector3[] avatarShapeScales)
         {
-            var transforms = new Matrix[_inverseBindPose.Length];
+            // Reused across frames: this runs twice a frame in first person,
+            // and a fresh 71-matrix array each time is half a megabyte a
+            // second of garbage for nothing.
+            if (_skinTransforms == null ||
+                _skinTransforms.Length != _inverseBindPose.Length)
+            {
+                _skinTransforms = new Matrix[_inverseBindPose.Length];
+            }
+            Matrix[] transforms = _skinTransforms;
             for (int proxyBone = 0;
                 proxyBone < transforms.Length;
                 proxyBone++)
@@ -5468,12 +5536,73 @@ namespace OpenClassic.XboxAvatar
             {
                 return;
             }
+            // A player being rebuilt - the local player on every world load,
+            // a remote one on respawn - leaves its previous avatar's imported
+            // model behind. Nothing else ever sees that model again, so hand
+            // its textures back here, or every world switch keeps a full
+            // texture set on the device for the rest of the session.
+            PlayerBinding previous;
+            if (Players.TryGetValue(gamer.Id, out previous) &&
+                previous != null &&
+                previous.Avatar != null &&
+                previous.Avatar != avatar)
+            {
+                ReleaseBinding(previous);
+            }
             Players[gamer.Id] = new PlayerBinding
             {
                 Gamer = gamer,
                 Avatar = avatar,
                 FallbackModel = fallbackModel
             };
+        }
+
+        /// <summary>
+        /// Detach and dispose a binding's imported model, if it has one.
+        /// Safe on a binding whose avatar has already been torn down.
+        /// </summary>
+        private static void ReleaseBinding(PlayerBinding binding)
+        {
+            if (binding == null || binding.Avatar == null)
+            {
+                return;
+            }
+            try
+            {
+                var retired = binding.Avatar.ProxyModelEntity as
+                    ImportedAvatarModelEntity;
+                if (retired != null)
+                {
+                    binding.Avatar.ProxyModelEntity = null;
+                    retired.ReleaseGraphicsResources();
+                }
+            }
+            catch (Exception exception)
+            {
+                ImportedAvatarModelEntity.WriteFailure(exception);
+            }
+        }
+
+        /// <summary>
+        /// Forget a gamer entirely: its binding, its cached avatar path, its
+        /// report line and every handshake record. Used when the gamer has
+        /// left, and when a new session starts and none of them apply.
+        /// </summary>
+        private static void ForgetGamer(byte id)
+        {
+            PlayerBinding binding;
+            if (Players.TryGetValue(id, out binding))
+            {
+                ReleaseBinding(binding);
+                Players.Remove(id);
+            }
+            RemoteAssetPaths.Remove(id);
+            AnchorReport.Remove(id);
+            PendingHello.Remove(id);
+            HelloSent.Remove(id);
+            PeerReady.Remove(id);
+            DeferredHello.Remove(id);
+            RemoveIncomingFor(id);
         }
 
         internal static string GetAssetPath(NetworkGamer gamer)
@@ -5492,7 +5621,28 @@ namespace OpenClassic.XboxAvatar
                 : null;
         }
 
+        /// <summary>
+        /// The three entry points the patched game calls are plain call
+        /// instructions with no handler around them, so anything thrown here
+        /// lands in the game's own message loop and ends the session. Every
+        /// one of them touches the disk - reading the local avatar to serve a
+        /// hello, installing a received one into the cache - and a locked
+        /// file, a full disk or a read-only game folder is an ordinary event,
+        /// not a reason to take the game down. Log it and carry on.
+        /// </summary>
         public static void OnGamerJoined(NetworkGamer gamer)
+        {
+            try
+            {
+                GamerJoined(gamer);
+            }
+            catch (Exception exception)
+            {
+                ImportedAvatarModelEntity.WriteFailure(exception);
+            }
+        }
+
+        private static void GamerJoined(NetworkGamer gamer)
         {
             if (gamer == null)
             {
@@ -5505,9 +5655,23 @@ namespace OpenClassic.XboxAvatar
                 // A fresh session for this process. Statics survive from the
                 // previous one, so re-prove ourselves before asking anybody for
                 // an avatar, or the second session repeats the first-join bug.
+                // The previous session's players are gone with it: release
+                // whatever they left on the device.
                 _capabilityAdvertised = false;
                 _helloGateDeadlineUtc = DateTime.UtcNow.AddSeconds(HelloGateSeconds);
                 DeferredHello.Clear();
+                var stale = new List<byte>();
+                foreach (KeyValuePair<byte, PlayerBinding> pair in Players)
+                {
+                    if (pair.Value == null || pair.Value.Gamer != gamer)
+                    {
+                        stale.Add(pair.Key);
+                    }
+                }
+                foreach (byte id in stale)
+                {
+                    ForgetGamer(id);
+                }
             }
             else
             {
@@ -5518,22 +5682,7 @@ namespace OpenClassic.XboxAvatar
                 if (Players.TryGetValue(gamer.Id, out binding) &&
                     binding.Gamer != gamer)
                 {
-                    // The previous occupant's model goes with the binding, so
-                    // hand its textures back rather than leaving them on the
-                    // device for the rest of the session.
-                    if (binding.Avatar != null)
-                    {
-                        var retired = binding.Avatar.ProxyModelEntity as
-                            ImportedAvatarModelEntity;
-                        if (retired != null)
-                        {
-                            binding.Avatar.ProxyModelEntity = null;
-                            retired.ReleaseGraphicsResources();
-                        }
-                    }
-                    Players.Remove(gamer.Id);
-                    RemoteAssetPaths.Remove(gamer.Id);
-                    AnchorReport.Remove(gamer.Id);
+                    ForgetGamer(gamer.Id);
                 }
                 PendingHello.Remove(gamer.Id);
                 HelloSent.Remove(gamer.Id);
@@ -5543,6 +5692,21 @@ namespace OpenClassic.XboxAvatar
         }
 
         public static bool OnMessage(Message message)
+        {
+            try
+            {
+                return HandleMessage(message);
+            }
+            catch (Exception exception)
+            {
+                ImportedAvatarModelEntity.WriteFailure(exception);
+                // A mod packet that failed is still ours; never let the stock
+                // handler see it.
+                return message is ZZAvatarSyncMessage;
+            }
+        }
+
+        private static bool HandleMessage(Message message)
         {
             PlayerExistsMessage playerExists = message as PlayerExistsMessage;
             if (playerExists != null)
@@ -5620,6 +5784,18 @@ namespace OpenClassic.XboxAvatar
         }
 
         public static void Update()
+        {
+            try
+            {
+                UpdateSession();
+            }
+            catch (Exception exception)
+            {
+                ImportedAvatarModelEntity.WriteFailure(exception);
+            }
+        }
+
+        private static void UpdateSession()
         {
             LocalNetworkGamer local = LocalGamer;
             if (local == null)
@@ -5892,7 +6068,8 @@ namespace OpenClassic.XboxAvatar
                 {
                     continue;
                 }
-                if (!(binding.Avatar.ProxyModelEntity is ImportedAvatarModelEntity))
+                if (ReportDue &&
+                    !(binding.Avatar.ProxyModelEntity is ImportedAvatarModelEntity))
                 {
                     // Not an error: this player has no imported avatar yet, so
                     // there is no custom grip to apply. Report it anyway, since
@@ -6546,6 +6723,25 @@ namespace OpenClassic.XboxAvatar
             foreach (string key in expiredIncoming)
             {
                 Incoming.Remove(key);
+            }
+
+            // The game gives the add-on no hook for a gamer leaving, so a
+            // departed player's binding - and the imported model and textures
+            // it roots - would otherwise stay until the id happened to be
+            // reused. The gamer object knows it has left; ask it.
+            var departed = new List<byte>();
+            foreach (KeyValuePair<byte, PlayerBinding> pair in Players)
+            {
+                if (pair.Value == null ||
+                    pair.Value.Gamer == null ||
+                    pair.Value.Gamer.HasLeftSession)
+                {
+                    departed.Add(pair.Key);
+                }
+            }
+            foreach (byte id in departed)
+            {
+                ForgetGamer(id);
             }
         }
 
