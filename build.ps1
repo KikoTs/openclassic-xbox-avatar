@@ -321,25 +321,33 @@ finally {
 # Run the smoke tests, rather than merely compiling them. They were being built
 # and left on disk, so a regression any of them was written to catch would have
 # shipped with a green build.
-$sampleAvatar = if ($SampleAvatar) { $SampleAvatar }
-                else { Join-Path $GameDirectory 'avatar.ocavatar' }
+# Deliberately not named $sampleAvatar: PowerShell variable names are
+# case-insensitive, so that name IS the $SampleAvatar parameter. Assigning to
+# it in two statements rather than one would quietly discard the caller's
+# fixture and fall back to the game folder, which is what happened in the
+# standalone build and went unnoticed because the tests still passed.
+$testAvatar = if ($SampleAvatar) { $SampleAvatar }
+              else { Join-Path $GameDirectory 'avatar.ocavatar' }
 $smokeTests = @(
     @{ Name      = 'AvatarProtocolSmoke'
-       Arguments = @($runtimeOut, $sampleAvatar, $GameDirectory)
-       Needs     = $sampleAvatar },
+       Arguments = @($runtimeOut, $testAvatar, $GameDirectory)
+       Needs     = $testAvatar },
     @{ Name      = 'AvatarMessageIdSmoke'
        Arguments = @((Join-Path $GameDirectory 'CastleMinerZ.exe'), $commonDll, $runtimeOut)
        Needs     = $null },
     @{ Name      = 'AvatarAttachmentSmoke'
-       Arguments = @($runtimeOut, $sampleAvatar, $GameDirectory)
-       Needs     = $sampleAvatar },
+       Arguments = @($runtimeOut, $testAvatar, $GameDirectory)
+       Needs     = $testAvatar },
     @{ Name      = 'FirstPersonHandSmoke'
-       Arguments = @($runtimeOut, $sampleAvatar, $GameDirectory)
-       Needs     = $sampleAvatar }
+       Arguments = @($runtimeOut, $testAvatar, $GameDirectory)
+       Needs     = $testAvatar }
 )
 
 Write-Host ''
 Write-Host 'Smoke tests:' -ForegroundColor Green
+# Two of these describe an avatar's geometry, so their numbers only mean
+# something once you know which avatar they measured.
+Write-Host ("  avatar: {0}" -f $testAvatar)
 foreach ($smokeTest in $smokeTests) {
     $smokeExe = Join-Path $bin ($smokeTest.Name + '.exe')
     if ($smokeTest.Needs -and -not (Test-Path -LiteralPath $smokeTest.Needs)) {
