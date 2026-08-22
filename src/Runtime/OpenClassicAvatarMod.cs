@@ -680,7 +680,9 @@ namespace OpenClassic.XboxAvatar
             {
                 try
                 {
-                    return new ImportedAvatarModelEntity(fallbackModel, avatar, assetPath);
+                    var entity = new ImportedAvatarModelEntity(fallbackModel, avatar, assetPath);
+                    AvatarNetworkBridge.NoteAppliedAsset(gamer, assetPath);
+                    return entity;
                 }
                 catch (Exception exception)
                 {
@@ -700,7 +702,8 @@ namespace OpenClassic.XboxAvatar
         private readonly Matrix[] _avatarSkinTransforms;
         private readonly Matrix[] _firstPersonLiveBones;
         private readonly int[] _proxyBoneByAvatar;
-        private readonly ProxyHandCarrier _firstPersonCarrier;
+        private readonly Model _fallbackModel;
+        private ProxyHandCarrier _firstPersonCarrier;
         private BasicEffect _effect;
         private bool _failed;
         private bool _firstPersonFailed;
@@ -726,26 +729,53 @@ namespace OpenClassic.XboxAvatar
                         "ProxyBoy is missing Xbox avatar bone " + bone + ".");
                 }
             }
+            _fallbackModel = fallbackModel;
+        }
+
+        /// <summary>
+        /// The first-person hand carrier, built the first time first person
+        /// draws rather than when the model is created.
+        ///
+        /// Building it needs the game's ProxyBoy content and a body mesh of a
+        /// particular shape, and a client that ships different content - a
+        /// retexture, a community build, 1.9.9 with its renamed character set
+        /// - can fail either. Built in the constructor, that failure threw the
+        /// whole model away and the player fell back to the stock avatar in
+        /// third person too, for something only first person needs. Built
+        /// here, inside first person's own try, the failure costs first person
+        /// alone and is logged by name.
+        /// </summary>
+        private ProxyHandCarrier EnsureFirstPersonCarrier()
+        {
+            if (_firstPersonCarrier != null)
+            {
+                return _firstPersonCarrier;
+            }
             // The selected stock avatar can be SWATMale, whose combined mesh
             // has deliberately bulky first-person glove geometry.  Its 71-bone
-            // skeleton matches ProxyBoy, so always use ProxyBoy's dedicated,
+            // skeleton matches ProxyBoy, so prefer ProxyBoy's dedicated,
             // continuous hand topology as the Xbox surface carrier while the
             // live StockModelEntity continues to supply the current pose.
-            Model handCarrierModel = fallbackModel;
+            Model handCarrierModel = _fallbackModel;
             try
             {
                 handCarrierModel = CastleMinerZGame.Instance.Content.Load<Model>(
                     "Character\\ProxyBoy");
             }
-            catch
+            catch (Exception exception)
             {
-                // Offline diagnostics do not create CastleMinerZGame.Instance;
-                // their explicitly supplied ProxyBoy model remains valid.
+                // Offline diagnostics do not create CastleMinerZGame.Instance,
+                // and 1.9.9 does not ship this asset; the fallback model is
+                // then the carrier source. Say so, once.
+                WriteFailure(new InvalidOperationException(
+                    "Character\\ProxyBoy is not loadable here; using the player's own model as the hand carrier.",
+                    exception));
             }
             _firstPersonCarrier = ProxyHandCarrier.Create(
                 handCarrierModel,
                 _asset,
                 _proxyBoneByAvatar);
+            return _firstPersonCarrier;
         }
 
         public override void Draw(GraphicsDevice device, GameTime gameTime, Matrix view, Matrix projection)
@@ -1409,6 +1439,7 @@ namespace OpenClassic.XboxAvatar
             Matrix projection)
         {
             EnsureGraphicsResources(device);
+            EnsureFirstPersonCarrier();
 
             // The arm follows the live ProxyBoy matrices, which carry
             // CastleMiner Z's exact pickaxe, compass, firearm and knife poses;
@@ -4676,7 +4707,15 @@ namespace OpenClassic.XboxAvatar
             batch.Indices = new short[indexCount];
             for (int index = 0; index < indexCount; index++)
             {
-                batch.Indices[index] = unchecked((short)reader.ReadUInt16());
+                ushort vertex = reader.ReadUInt16();
+                // The draw call does not check indices; a peer-supplied file
+                // must not be able to point one past the vertex array.
+                if (vertex >= vertexCount)
+                {
+                    throw new InvalidDataException(
+                        "Index out of range in " + batch.Name + ".");
+                }
+                batch.Indices[index] = unchecked((short)vertex);
             }
             batch.ThirdPersonIndices = batch.Indices;
             batch.HasFingerGeometry = HasFingerTriangles(
@@ -4693,7 +4732,44 @@ namespace OpenClassic.XboxAvatar
                 throw new InvalidDataException("Invalid texture size in " + batch.Name + ".");
             }
             batch.TexturePng = reader.ReadBytes(textureLength);
+            RequireSaneTexture(batch);
             return batch;
+        }
+
+        /// <summary>
+        /// The largest texture an avatar may carry, per side. The importer
+        /// emits 1024-pixel atlases; this leaves room for a larger capture
+        /// while refusing the 8192-square image a 4 MB file can easily hold,
+        /// which decodes to a quarter of a gigabyte in a 32-bit process
+        /// before any managed check can see it.
+        /// </summary>
+        private const int MaximumTextureSide = 4096;
+
+        private static void RequireSaneTexture(AvatarBatch batch)
+        {
+            byte[] png = batch.TexturePng;
+            if (png == null || png.Length == 0)
+            {
+                return;
+            }
+            // PNG: 8-byte signature, then the IHDR chunk whose first eight
+            // data bytes are width and height, big-endian, at offsets 16-23.
+            bool signature = png.Length >= 24 &&
+                png[0] == 0x89 && png[1] == 0x50 && png[2] == 0x4E && png[3] == 0x47 &&
+                png[4] == 0x0D && png[5] == 0x0A && png[6] == 0x1A && png[7] == 0x0A;
+            if (!signature)
+            {
+                throw new InvalidDataException(
+                    "Texture is not a PNG in " + batch.Name + ".");
+            }
+            long width = ((long)png[16] << 24) | ((long)png[17] << 16) | ((long)png[18] << 8) | png[19];
+            long height = ((long)png[20] << 24) | ((long)png[21] << 16) | ((long)png[22] << 8) | png[23];
+            if (width <= 0 || height <= 0 ||
+                width > MaximumTextureSide || height > MaximumTextureSide)
+            {
+                throw new InvalidDataException(
+                    "Texture " + width + "x" + height + " is out of range in " + batch.Name + ".");
+            }
         }
 
         private void ParseFaceLayerName()
@@ -5469,11 +5545,48 @@ namespace OpenClassic.XboxAvatar
         private const int ChunkPayload = 3000;
         private const int MaximumAssetBytes = 4 * 1024 * 1024;
         private const int MaximumIncomingTransfers = 8;
-        private const int ChunksPerUpdate = 2;
+        private const int ChunksPerUpdate = 4;
+
+        /// <summary>
+        /// How long a receiver waits for the first chunk after accepting a
+        /// manifest. Longer than the between-chunk timeout, because the
+        /// sender may be serving several peers and ours may be last in line.
+        /// </summary>
+        private static readonly TimeSpan FirstChunkTimeout = TimeSpan.FromSeconds(180);
+
+        /// <summary>
+        /// The shortest interval at which one peer's manifests are accepted.
+        /// Each one costs a hash of a cached file and possibly a full model
+        /// rebuild on the render thread, so a peer sending them at packet
+        /// rate must not be able to stall the frame.
+        /// </summary>
+        private static readonly TimeSpan ManifestInterval = TimeSpan.FromSeconds(5);
+        private static readonly Dictionary<byte, DateTime> LastManifestUtc =
+            new Dictionary<byte, DateTime>();
         private static readonly byte[] CapabilityMarker =
         {
             0x4f, 0x43, 0x58, 0x41, 0x43, 0x41, 0x50,
             ProtocolVersion
+        };
+
+        /// <summary>
+        /// The marker's second form carries the sender's avatar message id.
+        ///
+        /// Message ids are positional: every message type in the process,
+        /// sorted by name, and ours is last only as long as nothing sorts
+        /// after "DNA." and before us. A community build that registers its
+        /// own message types can shift the id, and then our packet is decoded
+        /// on the other side as whatever sits at that number - the hook
+        /// cannot intercept it, because it recognises packets by type. A
+        /// peer whose id differs is therefore not a peer we can talk to, and
+        /// the marker says which id its sender uses so that can be checked
+        /// before a single packet goes out. The first form is still accepted
+        /// from older builds, which are treated as they always were.
+        /// </summary>
+        private const byte MarkerWithMessageId = 2;
+        private static readonly byte[] MarkerPrefix =
+        {
+            0x4f, 0x43, 0x58, 0x41, 0x43, 0x41, 0x50
         };
         private static readonly TimeSpan TransferTimeout = TimeSpan.FromSeconds(45);
         private static readonly Dictionary<byte, PlayerBinding> Players =
@@ -5525,6 +5638,98 @@ namespace OpenClassic.XboxAvatar
             Assembly current = Assembly.GetExecutingAssembly();
             ReflectionTools.RegisterAssembly(entry ?? current, current);
             _capabilityAdvertisementPending = true;
+            PruneCache();
+        }
+
+        /// <summary>
+        /// The most the received-avatar cache may hold before the least
+        /// recently used files go. Every distinct avatar met on every server
+        /// is kept, at up to 4 MB each; without a ceiling that is a folder
+        /// that only ever grows.
+        /// </summary>
+        private const long MaximumCacheBytes = 256L * 1024 * 1024;
+
+        private static void PruneCache()
+        {
+            try
+            {
+                string folder = CacheFolder;
+                if (!Directory.Exists(folder))
+                {
+                    return;
+                }
+                // Leftovers of interrupted installs first.
+                foreach (string pattern in new[] { "*.part", "*.previous" })
+                {
+                    foreach (string stale in Directory.GetFiles(folder, pattern))
+                    {
+                        try { File.Delete(stale); }
+                        catch (IOException) { }
+                        catch (UnauthorizedAccessException) { }
+                    }
+                }
+                var files = new List<FileInfo>();
+                long total = 0;
+                foreach (string path in Directory.GetFiles(folder, "*.ocavatar"))
+                {
+                    var info = new FileInfo(path);
+                    files.Add(info);
+                    total += info.Length;
+                }
+                if (total <= MaximumCacheBytes)
+                {
+                    return;
+                }
+                files.Sort(delegate(FileInfo a, FileInfo b)
+                {
+                    return a.LastWriteTimeUtc.CompareTo(b.LastWriteTimeUtc);
+                });
+                foreach (FileInfo info in files)
+                {
+                    if (total <= MaximumCacheBytes)
+                    {
+                        break;
+                    }
+                    try
+                    {
+                        info.Delete();
+                        total -= info.Length;
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (Exception exception)
+            {
+                ImportedAvatarModelEntity.WriteFailure(exception);
+            }
+        }
+
+        /// <summary>
+        /// Record that a player's model was built from a cached avatar, so
+        /// the manifest that names the same file does not rebuild it.
+        /// </summary>
+        internal static void NoteAppliedAsset(NetworkGamer gamer, string assetPath)
+        {
+            if (gamer == null || string.IsNullOrEmpty(assetPath))
+            {
+                return;
+            }
+            PlayerBinding binding;
+            if (!Players.TryGetValue(gamer.Id, out binding) || binding.Gamer != gamer)
+            {
+                return;
+            }
+            string folder = CacheFolder;
+            string directory = Path.GetDirectoryName(assetPath);
+            if (directory != null &&
+                string.Equals(
+                    Path.GetFullPath(directory),
+                    Path.GetFullPath(folder),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                binding.AppliedHash = Path.GetFileNameWithoutExtension(assetPath);
+            }
         }
 
         internal static void NotePlayer(
@@ -5598,6 +5803,7 @@ namespace OpenClassic.XboxAvatar
             }
             RemoteAssetPaths.Remove(id);
             AnchorReport.Remove(id);
+            LastManifestUtc.Remove(id);
             PendingHello.Remove(id);
             HelloSent.Remove(id);
             PeerReady.Remove(id);
@@ -5684,6 +5890,12 @@ namespace OpenClassic.XboxAvatar
                 {
                     ForgetGamer(gamer.Id);
                 }
+                // Whatever the previous occupant of this id left behind is
+                // not this player's - least of all a cached avatar path,
+                // which would dress the newcomer in a stranger's avatar.
+                RemoteAssetPaths.Remove(gamer.Id);
+                AnchorReport.Remove(gamer.Id);
+                LastManifestUtc.Remove(gamer.Id);
                 PendingHello.Remove(gamer.Id);
                 HelloSent.Remove(gamer.Id);
                 PeerReady.Remove(gamer.Id);
@@ -5715,15 +5927,33 @@ namespace OpenClassic.XboxAvatar
                     !playerExists.Sender.IsLocal)
                 {
                     byte[] cleanDescription;
-                    if (TryStripCapabilityMarker(
+                    int peerMessageId;
+                    if (TryReadCapabilityMarker(
                         playerExists.AvatarDescriptionData,
-                        out cleanDescription))
+                        out cleanDescription,
+                        out peerMessageId))
                     {
                         // Never let the add-on marker leak into normal game
                         // avatar state, even though duplicate PlayerExists
                         // packets are ignored after the player is constructed.
                         playerExists.AvatarDescriptionData = cleanDescription;
-                        MarkPeerCapable(playerExists.Sender);
+                        int ownMessageId = ZZAvatarSyncMessage.LocalMessageId();
+                        if (peerMessageId >= 0 && ownMessageId >= 0 &&
+                            peerMessageId != ownMessageId)
+                        {
+                            // Talking to this peer would hand its game a
+                            // packet of the wrong type. Leave it stock.
+                            ImportedAvatarModelEntity.WriteFailure(
+                                new InvalidOperationException(
+                                    "Peer " + playerExists.Sender.Gamertag +
+                                    " registers the avatar message at id " + peerMessageId +
+                                    ", this client at " + ownMessageId +
+                                    "; its client registers other message types, so avatars are not exchanged with it."));
+                        }
+                        else
+                        {
+                            MarkPeerCapable(playerExists.Sender);
+                        }
                     }
                 }
                 return false;
@@ -5802,6 +6032,19 @@ namespace OpenClassic.XboxAvatar
             {
                 return;
             }
+            // The game keeps its local gamer after leaving a session, so this
+            // is reached in the main menu with a disposed session behind it;
+            // sending into that threw from the update loop every frame, and
+            // queued transfers never drained.
+            NetworkSession session = CurrentSession;
+            if (session == null || session.IsDisposed)
+            {
+                if (Players.Count > 0 || Outgoing.Count > 0 || Incoming.Count > 0 || Offers.Count > 0)
+                {
+                    ForgetSession();
+                }
+                return;
+            }
 
             FlushCapabilityAdvertisement(local);
 
@@ -5825,14 +6068,20 @@ namespace OpenClassic.XboxAvatar
 
             ServeDeferredHellos();
 
+            // Round-robin across transfers, one chunk each per turn. Served
+            // strictly first-come, a full lobby joining together made the
+            // last player wait through every transfer ahead of it - at 30 fps
+            // a 2 MB avatar is twelve seconds each - and its receiver timed
+            // out before a single chunk arrived, after which it never asked
+            // again and saw the stock model for the rest of the session.
             int sent = 0;
-            while (sent < ChunksPerUpdate && Outgoing.Count > 0)
+            int turns = Outgoing.Count;
+            while (sent < ChunksPerUpdate && turns-- > 0 && Outgoing.Count > 0)
             {
-                OutgoingTransfer transfer = Outgoing.Peek();
-                if (transfer.Target == null || transfer.Target.HasLeftSession ||
+                OutgoingTransfer transfer = Outgoing.Dequeue();
+                if (transfer.Target == null || HasLeft(transfer.Target) ||
                     transfer.NextChunk >= transfer.ChunkCount)
                 {
-                    Outgoing.Dequeue();
                     continue;
                 }
 
@@ -5854,9 +6103,9 @@ namespace OpenClassic.XboxAvatar
                     payload);
                 transfer.NextChunk++;
                 sent++;
-                if (transfer.NextChunk >= transfer.ChunkCount)
+                if (transfer.NextChunk < transfer.ChunkCount)
                 {
-                    Outgoing.Dequeue();
+                    Outgoing.Enqueue(transfer);
                 }
             }
 
@@ -5872,7 +6121,7 @@ namespace OpenClassic.XboxAvatar
 
         private static void QueueHello(NetworkGamer gamer)
         {
-            if (gamer == null || gamer.IsLocal || gamer.HasLeftSession)
+            if (gamer == null || gamer.IsLocal || AvatarNetworkBridge.HasLeft(gamer))
             {
                 return;
             }
@@ -5887,7 +6136,7 @@ namespace OpenClassic.XboxAvatar
 
         private static void MarkPeerCapable(NetworkGamer gamer)
         {
-            if (gamer == null || gamer.IsLocal || gamer.HasLeftSession)
+            if (gamer == null || gamer.IsLocal || AvatarNetworkBridge.HasLeft(gamer))
             {
                 return;
             }
@@ -5895,9 +6144,109 @@ namespace OpenClassic.XboxAvatar
             QueueHello(gamer);
         }
 
+        /// <summary>
+        /// Whether a gamer is no longer part of the live session.
+        ///
+        /// Not NetworkGamer.HasLeftSession: in this engine nothing ever sets
+        /// it, so every test of it was dead code - departed players were
+        /// never forgotten and a queue kept sending into a session that had
+        /// been disposed. What the engine does maintain is the session's
+        /// gamer list, which RemoveGamer takes a gamer out of, and the
+        /// session itself, which LeaveGame disposes. A local gamer is never
+        /// judged gone here: offline play has no session at all, and the
+        /// local player is replaced, not removed, when a new session starts.
+        /// </summary>
+        internal static bool HasLeft(NetworkGamer gamer)
+        {
+            if (gamer == null)
+            {
+                return true;
+            }
+            if (gamer.HasLeftSession)
+            {
+                return true;
+            }
+            if (gamer.IsLocal)
+            {
+                return false;
+            }
+            NetworkSession session = CurrentSession;
+            if (session == null || session.IsDisposed)
+            {
+                return true;
+            }
+            if (gamer.Session != null && gamer.Session != session)
+            {
+                return true;
+            }
+            try
+            {
+                foreach (NetworkGamer member in session.AllGamers)
+                {
+                    if (member == gamer)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            catch
+            {
+                // A session mid-teardown: its provider is already gone.
+                return true;
+            }
+        }
+
+        private static NetworkSession CurrentSession
+        {
+            get
+            {
+                try
+                {
+                    CastleMinerZGame game = CastleMinerZGame.Instance;
+                    return game == null ? null : game.CurrentNetworkSession;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>
+        /// The session is over: nothing queued can be delivered and nobody
+        /// bound is still here. Drop it all, and release every remote
+        /// player's model. The local player's binding stays until the next
+        /// session replaces it, since the local gamer object outlives the
+        /// session in this engine.
+        /// </summary>
+        private static void ForgetSession()
+        {
+            var ids = new List<byte>();
+            foreach (KeyValuePair<byte, PlayerBinding> pair in Players)
+            {
+                if (pair.Value == null || pair.Value.Gamer == null || !pair.Value.Gamer.IsLocal)
+                {
+                    ids.Add(pair.Key);
+                }
+            }
+            foreach (byte id in ids)
+            {
+                ForgetGamer(id);
+            }
+            Offers.Clear();
+            Outgoing.Clear();
+            Incoming.Clear();
+            PendingHello.Clear();
+            HelloSent.Clear();
+            PeerReady.Clear();
+            DeferredHello.Clear();
+            LastManifestUtc.Clear();
+        }
+
         internal static bool IsPeerCapable(NetworkGamer gamer)
         {
-            if (gamer == null || gamer.IsLocal || gamer.HasLeftSession)
+            if (gamer == null || gamer.IsLocal || AvatarNetworkBridge.HasLeft(gamer))
             {
                 return false;
             }
@@ -5911,8 +6260,20 @@ namespace OpenClassic.XboxAvatar
             int descriptionLength = description == null
                 ? 0
                 : description.Length;
-            byte[] decorated = new byte[
-                descriptionLength + CapabilityMarker.Length];
+            int messageId = ZZAvatarSyncMessage.LocalMessageId();
+            byte[] marker;
+            if (messageId >= 0 && messageId <= byte.MaxValue)
+            {
+                marker = new byte[MarkerPrefix.Length + 2];
+                Buffer.BlockCopy(MarkerPrefix, 0, marker, 0, MarkerPrefix.Length);
+                marker[MarkerPrefix.Length] = MarkerWithMessageId;
+                marker[MarkerPrefix.Length + 1] = (byte)messageId;
+            }
+            else
+            {
+                marker = CapabilityMarker;
+            }
+            byte[] decorated = new byte[descriptionLength + marker.Length];
             if (descriptionLength > 0)
             {
                 Buffer.BlockCopy(
@@ -5923,11 +6284,11 @@ namespace OpenClassic.XboxAvatar
                     descriptionLength);
             }
             Buffer.BlockCopy(
-                CapabilityMarker,
+                marker,
                 0,
                 decorated,
                 descriptionLength,
-                CapabilityMarker.Length);
+                marker.Length);
             return decorated;
         }
 
@@ -5935,20 +6296,43 @@ namespace OpenClassic.XboxAvatar
             byte[] decorated,
             out byte[] description)
         {
+            int ignoredMessageId;
+            return TryReadCapabilityMarker(decorated, out description, out ignoredMessageId);
+        }
+
+        /// <summary>
+        /// Recognises either marker form. <paramref name="messageId"/> is the
+        /// sender's avatar message id when the marker carried one, else -1.
+        /// </summary>
+        internal static bool TryReadCapabilityMarker(
+            byte[] decorated,
+            out byte[] description,
+            out int messageId)
+        {
             description = decorated;
-            if (decorated == null ||
-                decorated.Length < CapabilityMarker.Length)
+            messageId = -1;
+            if (decorated == null)
             {
                 return false;
             }
-            int markerOffset = decorated.Length - CapabilityMarker.Length;
-            for (int index = 0; index < CapabilityMarker.Length; index++)
+            int markerOffset;
+            int withId = MarkerPrefix.Length + 2;
+            if (decorated.Length >= withId &&
+                HasPrefixAt(decorated, decorated.Length - withId) &&
+                decorated[decorated.Length - 2] == MarkerWithMessageId)
             {
-                if (decorated[markerOffset + index] !=
-                    CapabilityMarker[index])
-                {
-                    return false;
-                }
+                markerOffset = decorated.Length - withId;
+                messageId = decorated[decorated.Length - 1];
+            }
+            else if (decorated.Length >= CapabilityMarker.Length &&
+                HasPrefixAt(decorated, decorated.Length - CapabilityMarker.Length) &&
+                decorated[decorated.Length - 1] == ProtocolVersion)
+            {
+                markerOffset = decorated.Length - CapabilityMarker.Length;
+            }
+            else
+            {
+                return false;
             }
             description = new byte[markerOffset];
             if (markerOffset > 0)
@@ -5959,6 +6343,22 @@ namespace OpenClassic.XboxAvatar
                     description,
                     0,
                     markerOffset);
+            }
+            return true;
+        }
+
+        private static bool HasPrefixAt(byte[] data, int offset)
+        {
+            if (offset < 0 || offset + MarkerPrefix.Length > data.Length)
+            {
+                return false;
+            }
+            for (int index = 0; index < MarkerPrefix.Length; index++)
+            {
+                if (data[offset + index] != MarkerPrefix[index])
+                {
+                    return false;
+                }
             }
             return true;
         }
@@ -6004,7 +6404,7 @@ namespace OpenClassic.XboxAvatar
             foreach (byte id in ids)
             {
                 NetworkGamer peer = DeferredHello[id];
-                if (peer == null || peer.HasLeftSession)
+                if (peer == null || AvatarNetworkBridge.HasLeft(peer))
                 {
                     DeferredHello.Remove(id);
                     continue;
@@ -6042,7 +6442,7 @@ namespace OpenClassic.XboxAvatar
             foreach (byte id in ids)
             {
                 NetworkGamer peer = PendingHello[id];
-                if (peer == null || peer.HasLeftSession)
+                if (peer == null || AvatarNetworkBridge.HasLeft(peer))
                 {
                     PendingHello.Remove(id);
                     HelloSent.Remove(id);
@@ -6377,9 +6777,27 @@ namespace OpenClassic.XboxAvatar
         {
             LocalNetworkGamer local = LocalGamer;
             LocalSnapshot snapshot = GetLocalSnapshot();
-            if (local == null || snapshot == null || target.HasLeftSession)
+            if (local == null || snapshot == null || HasLeft(target))
             {
                 return;
+            }
+
+            // One offer and one transfer per peer at a time. A peer that
+            // says hello at packet rate would otherwise fill the queue with
+            // copies of the same avatar for itself and starve everyone else.
+            foreach (OutgoingOffer offer in Offers.Values)
+            {
+                if (offer.Target == target && offer.ExpiresUtc > DateTime.UtcNow)
+                {
+                    return;
+                }
+            }
+            foreach (OutgoingTransfer transfer in Outgoing)
+            {
+                if (transfer.Target == target)
+                {
+                    return;
+                }
             }
 
             uint transferId = NextTransferId();
@@ -6411,18 +6829,38 @@ namespace OpenClassic.XboxAvatar
                 return;
             }
 
+            // Only a peer we asked may answer, and not faster than we could
+            // possibly use the answer.
+            NetworkGamer asked;
+            if (!HelloSent.TryGetValue(packet.Sender.Id, out asked) ||
+                asked != packet.Sender)
+            {
+                return;
+            }
+            DateTime now = DateTime.UtcNow;
+            DateTime last;
+            if (LastManifestUtc.TryGetValue(packet.Sender.Id, out last) &&
+                now - last < ManifestInterval)
+            {
+                return;
+            }
+            LastManifestUtc[packet.Sender.Id] = now;
+
             string cached = CachePath(packet.Hash);
             if (FileMatches(cached, packet.TotalLength, packet.Hash))
             {
                 SetRemoteAsset(packet.Sender, cached, packet.Hash);
                 return;
             }
+            // This sender's own stalled transfer, if any, gives way before the
+            // cap is judged - otherwise a full table refuses the one peer that
+            // is trying to replace its own slot.
+            RemoveIncomingFor(packet.Sender.Id);
             if (Incoming.Count >= MaximumIncomingTransfers)
             {
                 return;
             }
 
-            RemoveIncomingFor(packet.Sender.Id);
             string key = TransferKey(packet.Sender.Id, packet.TransferId);
             Incoming[key] = new IncomingTransfer
             {
@@ -6433,7 +6871,7 @@ namespace OpenClassic.XboxAvatar
                 Hash = (byte[])packet.Hash.Clone(),
                 Bytes = new byte[packet.TotalLength],
                 Received = new BitArray(packet.ChunkCount),
-                ExpiresUtc = DateTime.UtcNow + TransferTimeout
+                ExpiresUtc = now + FirstChunkTimeout
             };
             ZZAvatarSyncMessage.SendPacket(
                 LocalGamer,
@@ -6701,7 +7139,7 @@ namespace OpenClassic.XboxAvatar
             foreach (KeyValuePair<string, OutgoingOffer> pair in Offers)
             {
                 if (pair.Value.ExpiresUtc < now ||
-                    pair.Value.Target == null || pair.Value.Target.HasLeftSession)
+                    pair.Value.Target == null || AvatarNetworkBridge.HasLeft(pair.Value.Target))
                 {
                     expiredOffers.Add(pair.Key);
                 }
@@ -6715,7 +7153,7 @@ namespace OpenClassic.XboxAvatar
             foreach (KeyValuePair<string, IncomingTransfer> pair in Incoming)
             {
                 if (pair.Value.ExpiresUtc < now ||
-                    pair.Value.Sender == null || pair.Value.Sender.HasLeftSession)
+                    pair.Value.Sender == null || AvatarNetworkBridge.HasLeft(pair.Value.Sender))
                 {
                     expiredIncoming.Add(pair.Key);
                 }
@@ -6734,7 +7172,7 @@ namespace OpenClassic.XboxAvatar
             {
                 if (pair.Value == null ||
                     pair.Value.Gamer == null ||
-                    pair.Value.Gamer.HasLeftSession)
+                    AvatarNetworkBridge.HasLeft(pair.Value.Gamer))
                 {
                     departed.Add(pair.Key);
                 }
@@ -6956,6 +7394,24 @@ namespace OpenClassic.XboxAvatar
             writer.Write(Payload);
         }
 
+        /// <summary>
+        /// The id this process registered the avatar message under, or -1
+        /// before registration - the offline tools load this assembly
+        /// without the game's message table.
+        /// </summary>
+        internal static int LocalMessageId()
+        {
+            try
+            {
+                ZZAvatarSyncMessage instance = GetSendInstance<ZZAvatarSyncMessage>();
+                return instance == null ? -1 : instance.MessageID;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
         internal static void SendHello(
             LocalNetworkGamer from,
             NetworkGamer to)
@@ -6983,7 +7439,7 @@ namespace OpenClassic.XboxAvatar
             byte[] hash,
             byte[] payload)
         {
-            if (from == null || to == null || to.HasLeftSession ||
+            if (from == null || to == null || AvatarNetworkBridge.HasLeft(to) ||
                 !AvatarNetworkBridge.IsPeerCapable(to) ||
                 hash == null || hash.Length != 32 || payload == null ||
                 payload.Length > 3000)

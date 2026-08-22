@@ -197,6 +197,32 @@ internal static class AvatarProtocolSmoke
         Require(!(bool)stripMarker.Invoke(null, wrongArguments),
             "incompatible capability protocol version was accepted");
 
+        // The second marker form carries the sender's message id. Outside
+        // the game nothing is registered, so it has to be built by hand.
+        MethodInfo readMarker = bridge.GetMethod("TryReadCapabilityMarker", Hidden);
+        byte[] withId = new byte[stockDescription.Length + 9];
+        Buffer.BlockCopy(stockDescription, 0, withId, 0, stockDescription.Length);
+        Buffer.BlockCopy(new byte[] { 0x4f, 0x43, 0x58, 0x41, 0x43, 0x41, 0x50, 2, 7 },
+            0, withId, stockDescription.Length, 9);
+        object[] readArguments = { withId, null, null };
+        Require((bool)readMarker.Invoke(null, readArguments),
+            "capability marker carrying a message id was rejected");
+        Require((int)readArguments[2] == 7,
+            "capability marker's message id was misread");
+        Require(stockDescription.SequenceEqual((byte[])readArguments[1]),
+            "stripping the id-carrying marker changed the stock description");
+        object[] legacyRead = { decoratedDescription, null, null };
+        Require((bool)readMarker.Invoke(null, legacyRead) && (int)legacyRead[2] == -1,
+            "first-form marker must read as capable with no message id");
+        object[] stripWithId = { withId, null };
+        Require((bool)stripMarker.Invoke(null, stripWithId) &&
+            stockDescription.SequenceEqual((byte[])stripWithId[1]),
+            "the plain strip does not accept the id-carrying marker");
+        byte[] truncatedId = withId.Take(withId.Length - 1).ToArray();
+        object[] truncatedArguments = { truncatedId, null, null };
+        Require(!(bool)readMarker.Invoke(null, truncatedArguments),
+            "a marker missing its message id was accepted");
+
         MethodInfo sendPacket = packetType.GetMethod("SendPacket", Hidden);
         MethodInfo isPeerCapable = bridge.GetMethod("IsPeerCapable", Hidden);
         Require(Calls(sendPacket, isPeerCapable),

@@ -236,8 +236,16 @@ Invoke-Native 'Manager publication' {
         -p:IncludeNativeLibrariesForSelfExtract=true `
         -o $managerPublish
 }
-Copy-Item -LiteralPath (Join-Path $managerPublish 'AvatarModPatcher.exe') `
-    -Destination (Join-Path $bin $managerName)
+if ($Brand -eq 'OpenClassic') {
+    Copy-Item -LiteralPath (Join-Path $managerPublish 'AvatarModPatcher.exe') `
+        -Destination (Join-Path $bin $managerName)
+} else {
+    # The manager is the OpenClassic-branded patcher: it looks for
+    # OpenClassicAvatarMod.dll and the OpenClassic Addons folder by name, so a
+    # renamed copy would install nothing and say so confusingly. The XboxAvatar
+    # brand ships its own setup tool instead.
+    Write-Host "Skipping the OpenClassic manager for brand '$Brand'."
+}
 
 $avatarPackage = Get-AppxPackage -Name 'Microsoft.Avatars' |
     Sort-Object Version -Descending |
