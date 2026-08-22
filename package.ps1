@@ -1,14 +1,22 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$GameDirectory
+    [string]$GameDirectory,
+
+    # An .ocavatar for the smoke tests to parse. A fixture only - it is never
+    # packaged, and need not belong to the client being built against. Without
+    # one the avatar-dependent tests fall back to the game folder and SKIP if
+    # it has none, so read the smoke-test lines before shipping.
+    [string]$SampleAvatar
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-& (Join-Path $repoRoot 'build.ps1') -GameDirectory $GameDirectory
+$buildArguments = @{ GameDirectory = $GameDirectory }
+if ($SampleAvatar) { $buildArguments['SampleAvatar'] = $SampleAvatar }
+& (Join-Path $repoRoot 'build.ps1') @buildArguments
 
 $artifacts = Join-Path $repoRoot 'artifacts'
 $bin = Join-Path $artifacts 'bin'
